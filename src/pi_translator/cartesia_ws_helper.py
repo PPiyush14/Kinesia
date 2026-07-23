@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import base64
+import json
+import logging
+from typing import Iterator
+
+import websocket
+
+logger = logging.getLogger(__name__)
+
+
+class CartesiaSyncWS:
+    def __init__(
+        self,
+        *,
+        url: str,
+        api_key: str,
+        version: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.url = url
+        self.api_key = api_key
+        self.version = version
+        self.timeout_seconds = timeout_seconds
+        self.headers = [
+            f"Authorization: Bearer {self.api_key}",
+            f"Cartesia-Version: {self.version}",
+        ]
+        self._active_ws = None
+
+    def _create_connection(self):
+        ws = websocket.create_connection(
+            self.url,
+            header=self.headers,
+            enable_multithread=True,
+            timeout=self.timeout_seconds,
+        )
+        logger.debug("CartesiaSyncWS connection established")
+        return ws
+
+    def close(self) -> None:
+        if self._active_ws is not None:
+            try:
+                self._active_ws.close()
+            except Exception:
+                pass
+            finally:
+                self._active_ws = None
+
+    def send_tts(self, payload: dict) -> tuple[object | None, bool]:
+        self.close()
+
+        try:
+            ws = self._create_connection()
+            ws.send(json.dumps(payload))
+        except Exception as exc:
+            logger.error("CartesiaSyncWS send_tts failed: %s", exc)
+            try:
+                ws.close()  # type: ignore[name-defined]
+            except Exception:
+                pass
+            return None, False
+
+        self._active_ws = ws
+        return ws, True
+
+    def receive_chunks(self, ws=None) -> Iterator[bytes]:
+        if ws is None:
+            ws = self._active_ws
+        if ws is None:
+            return
+
+        try:
+            while True:
+                try:
+                    message = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                except (websocket.WebSocketConnectionClosedException, OSError):
+                    return
+
+                if not message:
+                    return
+
+                try:
+                    response = json.loads(message)
+                except json.JSONDecodeError:
+                    logger.warning("CartesiaSyncWS received non-JSON message")
+                    continue
+
+                if response.get("type") == "chunk":
+                    encoded = response.get("data")
+                    if encoded:
+                        yield base64.b64decode(encoded)
+
+                if response.get("type") == "error":
+                    raise RuntimeError(
+                        "Cartesia websocket error: "
+                        f"{response.get('message') or response.get('error') or response}"
+                    )
+
+                if response.get("done") is True or response.get("type") in {"done", "completed"}:
+                    return
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+            if ws is self._active_ws:
+                self._active_ws = None

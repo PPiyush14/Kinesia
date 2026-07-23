@@ -1,0 +1,7 @@
+numpy>=1.26,<3
+google-cloud-texttospeech>=2.21,<3
+python-dotenv>=1.0,<2
+requests>=2.32,<3
+sounddevice>=0.4.7,<1
+websocket-client>=1.8,<2
+websockets>=14,<16
