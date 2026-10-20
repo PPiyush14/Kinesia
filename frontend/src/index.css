@@ -1,0 +1,100 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    @apply h-full;
+  }
+
+  body {
+    @apply min-h-full bg-canvas text-ink-primary;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+
+  ::selection { background-color: rgba(16,185,129,0.25); color: #f4f6f9; }
+}
+
+@layer components {
+  .glass {
+    @apply bg-surface-2/70 backdrop-blur-xl border border-white/[0.07] shadow-elevation-2;
+  }
+
+  .glass-strong {
+    @apply bg-surface-1/90 backdrop-blur-2xl border border-white/[0.09] shadow-elevation-3;
+  }
+
+  .surface-card {
+    @apply bg-surface-1 border border-border rounded-2xl shadow-elevation-1;
+  }
+
+  .text-gradient {
+    @apply bg-gradient-to-r from-accent to-accent-cyan bg-clip-text text-transparent;
+  }
+
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas;
+  }
+
+  .page-glow {
+    background:
+      radial-gradient(ellipse 80% 40% at 50% -10%, rgba(16,185,129,0.08) 0%, transparent 70%),
+      radial-gradient(ellipse 60% 30% at 80% 20%, rgba(6,182,212,0.06) 0%, transparent 60%);
+  }
+
+  .skeleton {
+    background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    @apply rounded-lg;
+  }
+}
+
+@layer utilities {
+  .safe-pb { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .safe-pt { padding-top: env(safe-area-inset-top, 0px); }
+
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

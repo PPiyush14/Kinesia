@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+env
+frontend/node_modules
+frontend/dist
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.coverage
+htmlcov
+.DS_Store
+.env
+data/*.db

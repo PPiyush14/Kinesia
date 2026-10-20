@@ -1,0 +1,25 @@
+{
+  "turns_analyzed": 126,
+  "total": {
+    "mean_ms": 300.2,
+    "median_ms": 62.5,
+    "p90_ms": 112.5,
+    "p95_ms": 118.8,
+    "min_ms": 0.0,
+    "max_ms": 7520.9
+  },
+  "gemma_llm": {
+    "mean_ms": 9.7,
+    "median_ms": 0.0,
+    "p90_ms": 0.0
+  },
+  "tts_synthesis": {
+    "mean_ms": 38.8,
+    "median_ms": 0.0,
+    "p90_ms": 0.0
+  },
+  "audio_playback": {
+    "mean_ms": 193.3,
+    "median_ms": 0.0
+  }
+}

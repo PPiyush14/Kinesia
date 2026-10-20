@@ -1,9 +1,46 @@
-.env
-.venv/
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
 *.egg-info/
 .pytest_cache/
-build/
-dist/
-runs/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Data & runtime
+data/*.db
+data/*.db-*
+session_conversations/*
+!session_conversations/.gitkeep
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+src/pi_translator/web/assets/
+*.log
