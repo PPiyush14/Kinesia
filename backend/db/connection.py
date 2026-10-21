@@ -118,7 +118,7 @@ def init_db() -> None:
         with get_db() as db:
             pg = db.is_pg
 
-            bool_type = "BOOLEAN" if pg else "INTEGER"
+            bool_type = "BOOLEAN"
             real_type = "DOUBLE PRECISION" if pg else "REAL"
 
             db.execute(
@@ -147,8 +147,8 @@ def init_db() -> None:
                     title VARCHAR(200) NOT NULL,
                     passcode_hash VARCHAR(255),
                     host_id VARCHAR(36) REFERENCES users(id),
-                    record_session {bool_type} DEFAULT 1,
-                    is_active {bool_type} DEFAULT 1,
+                    record_session {bool_type} DEFAULT TRUE,
+                    is_active {bool_type} DEFAULT TRUE,
                     created_at {real_type} NOT NULL,
                     ended_at {real_type}
                 )
@@ -166,7 +166,7 @@ def init_db() -> None:
                     left_at {real_type},
                     speaking_lang VARCHAR(10) DEFAULT 'en',
                     listening_lang VARCHAR(10) DEFAULT 'hi',
-                    is_mic_muted {bool_type} DEFAULT 0
+                    is_mic_muted {bool_type} DEFAULT FALSE
                 )
                 """
             )

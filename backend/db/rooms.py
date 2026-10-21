@@ -53,9 +53,9 @@ def create_room(
             INSERT INTO rooms (
                 id, room_code, title, passcode_hash, host_id,
                 record_session, is_active, created_at, ended_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, NULL)
             """,
-            (room_id, room_code, clean_title, stored_pass, host_id, 1 if record_session else 0, now),
+            (room_id, room_code, clean_title, stored_pass, host_id, bool(record_session), now),
         )
 
     return {
@@ -131,7 +131,7 @@ def end_room(room_code: str) -> dict[str, Any]:
     now = time.time()
     with get_db() as db:
         db.execute(
-            "UPDATE rooms SET is_active = 0, ended_at = ? WHERE room_code = ?",
+            "UPDATE rooms SET is_active = FALSE, ended_at = ? WHERE room_code = ?",
             (now, clean_code),
         )
         room = db.fetchone("SELECT id, room_code, title, created_at, ended_at FROM rooms WHERE room_code = ?", (clean_code,))
@@ -188,7 +188,7 @@ def add_participant(
             INSERT INTO room_participants (
                 id, room_id, user_id, user_name, joined_at, left_at,
                 speaking_lang, listening_lang, is_mic_muted
-            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0)
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, FALSE)
             """,
             (participant_id, room_id, user_id, user_name, now, speaking_lang, listening_lang),
         )
