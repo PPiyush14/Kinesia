@@ -75,6 +75,8 @@ export function DialogueCanvas({
   const [showEndModal, setShowEndModal] = useState(false);
   const [showClearModal, setShowClearModal] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [liveInterim, setLiveInterim] = useState('');
 
   const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subtitleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -137,9 +139,15 @@ export function DialogueCanvas({
           (audioRef.current as any).setSinkId(savedOutput).catch(() => {});
         }
         audioRef.current.src = audioDataUrl;
-        audioRef.current.play().catch(() => {});
+        audioRef.current.onplay = () => setIsPlayingAudio(true);
+        audioRef.current.onended = () => setIsPlayingAudio(false);
+        audioRef.current.onerror = () => setIsPlayingAudio(false);
+        audioRef.current.play().catch(() => {
+          setIsPlayingAudio(false);
+        });
       } catch (err) {
         console.error('Playback error:', err);
+        setIsPlayingAudio(false);
       }
     },
     [isAudioMuted]
@@ -172,9 +180,12 @@ export function DialogueCanvas({
         try {
           const utterance = new SpeechSynthesisUtterance(turn.localized_text);
           utterance.lang = mapLang(listeningLang || turn.listening_lang || 'en');
+          utterance.onstart = () => setIsPlayingAudio(true);
+          utterance.onend = () => setIsPlayingAudio(false);
+          utterance.onerror = () => setIsPlayingAudio(false);
           window.speechSynthesis.speak(utterance);
         } catch {
-          /* browser speech synthesis error ignored */
+          setIsPlayingAudio(false);
         }
       }
     },
@@ -260,7 +271,12 @@ export function DialogueCanvas({
   const { listening, supported } = useSpeechDictation({
     lang: speakingLang,
     enabled: !isMicMuted,
-    onResult: (text: string) => void handleDictatedText(text),
+    duckDuringPlayback: isPlayingAudio,
+    onResult: (text: string) => {
+      setLiveInterim('');
+      void handleDictatedText(text);
+    },
+    onInterim: setLiveInterim,
   });
 
   useEffect(() => {
@@ -496,6 +512,24 @@ export function DialogueCanvas({
                 {activeSubtitle.original_text !== activeSubtitle.localized_text && (
                   <p className="text-xs text-ink-muted italic">{activeSubtitle.original_text}</p>
                 )}
+              </div>
+            </motion.div>
+          )}
+
+          {/* Local speaker live transcription indicator */}
+          {!activeSubtitle && liveInterim && !isMicMuted && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 6 }}
+              className="absolute bottom-28 left-4 right-4 sm:left-auto sm:right-auto sm:max-w-md mx-auto z-20 pointer-events-none"
+            >
+              <div className="rounded-xl bg-surface-0/95 backdrop-blur-md border border-accent/40 shadow-elevation-2 px-3.5 py-2 flex items-center gap-2.5">
+                <span className="w-2 h-2 rounded-full bg-accent animate-ping" />
+                <p className="text-xs text-ink-primary font-medium truncate">
+                  <span className="text-accent font-semibold mr-1.5">You:</span>
+                  {liveInterim}
+                </p>
               </div>
             </motion.div>
           )}

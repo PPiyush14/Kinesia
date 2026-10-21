@@ -117,6 +117,17 @@ export const roomService = {
     return apiCall(`/api/v1/rooms/${code}/speak`, 'POST', params, true);
   },
 
+  async speakAudio(
+    code: string,
+    params: {
+      audio_base64: string;
+      source_lang: string;
+      mime_type?: string;
+    }
+  ): Promise<unknown> {
+    return apiCall(`/api/v1/rooms/${code}/speak-audio`, 'POST', params, true);
+  },
+
   async endSession(code: string): Promise<SessionInsights> {
     return apiCall<SessionInsights>(`/api/v1/rooms/${code}/end`, 'POST', {}, true);
   },

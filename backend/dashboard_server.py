@@ -1375,6 +1375,29 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     source_lang=payload.get("source_lang", "en"),
                     confidence=float(payload.get("confidence", 1.0)),
                 )
+            elif path.startswith("/api/v1/rooms/") and path.endswith("/speak-audio"):
+                user = self._get_auth_user()
+                if not user:
+                    self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                    return
+                room_code = path.split("/")[4]
+                audio_b64 = payload.get("audio_base64", "")
+                if not audio_b64:
+                    self._send_v1_error("audio_base64 is required", status=HTTPStatus.BAD_REQUEST)
+                    return
+                import base64
+                if "," in audio_b64:
+                    audio_b64 = audio_b64.split(",", 1)[1]
+                audio_bytes = base64.b64decode(audio_b64)
+                mime = payload.get("mime_type", "audio/webm")
+                response = self.state.coordinator.process_audio_utterance(
+                    room_code=room_code,
+                    speaker_id=user["id"],
+                    speaker_name=user.get("display_name") or user["username"],
+                    audio_bytes=audio_bytes,
+                    source_lang=payload.get("source_lang", "en"),
+                    mime_type=mime,
+                )
             elif path.startswith("/api/v1/rooms/") and path.endswith("/leave"):
                 user = self._get_auth_user()
                 if not user:

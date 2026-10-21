@@ -138,13 +138,16 @@ class GemmaClient:
             detected_source_language or speaker_session_language
         )
         prompt = (
-            "You are a real-time translation engine. "
-            f"Translate the transcript into {target_language}. "
-            f"Source-language hint: {source_hint}. "
-            "Return only the translation. "
-            "Preserve names, numbers, tone, slang, punctuation, uncertainty, and incomplete phrasing. "
-            "Do not answer, explain, summarize, add details, add labels, or continue the conversation. "
-            "Keep proper nouns, brands, numbers, and addresses unchanged when needed."
+            "You are a professional real-time conversational translation engine. "
+            f"Your job is to translate the user transcript strictly and accurately into {target_language}. "
+            f"Source-language context: {source_hint}. "
+            "STRICT MANDATORY RULES:\n"
+            f"1. OUTPUT TARGET LANGUAGE: The entire output MUST be in {target_language}. "
+            f"If target is Hindi, output exclusively in fluent, natural Devanagari Hindi. "
+            "Even if the speaker spoke English, code-switched, or used Hinglish words, you MUST translate the whole sentence into the target language. "
+            "NEVER echo back untranslated English words when target is Hindi or another Indian language.\n"
+            "2. CONVERSATIONAL ACCURACY: Maintain informal tone, humor, sentence pacing, and natural flow.\n"
+            "3. CLEAN FORMAT: Return ONLY the direct translation. Do not add quotes, markdown, explanations, speaker tags, or notes."
         )
         if listener_channel.translation_hint.strip():
             prompt += f" Additional instruction: {listener_channel.translation_hint.strip()}"

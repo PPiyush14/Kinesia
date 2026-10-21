@@ -16,7 +16,7 @@ PLACEHOLDER_PREFIXES = (
     "<",
 )
 
-DEFAULT_GEMMA_RESPONSE_BASE_URL = "http://43.242.226.49:8100/v1"
+DEFAULT_GEMMA_RESPONSE_BASE_URL = "https://api.groq.com/openai/v1"
 
 
 @dataclass(frozen=True)
@@ -81,6 +81,7 @@ class AppConfig:
     cartesia_context_prefix: str
     cartesia_emotions: list[str]
     channels: dict[str, ChannelConfig]
+    groq_whisper_model: str = "whisper-large-v3-turbo"
     save_audio: bool = False
     webhook_url: str | None = None
     webhook_secret: str | None = None
@@ -145,7 +146,7 @@ def project_root() -> Path:
 def load_config() -> AppConfig:
     root = project_root()
     load_dotenv(root / ".env", override=False)
-    tts_provider = _normalize_tts_provider(_env("TTS_PROVIDER", "cartesia"))
+    tts_provider = _normalize_tts_provider(_env("TTS_PROVIDER", "edge"))
     google_tts_credentials_path = _resolve_optional_path(
         _first_non_empty_env(
             "GOOGLE_TTS_CREDENTIALS_PATH",
@@ -197,7 +198,7 @@ def load_config() -> AppConfig:
             DEFAULT_GEMMA_RESPONSE_BASE_URL,
         ).rstrip("/"),
         gemma_response_api_key=_env("GEMMA_RESPONSE_API_KEY", ""),
-        gemma_model=_env("GEMMA_MODEL", ""),
+        gemma_model=_env("GEMMA_MODEL", "qwen/qwen3.8-27b"),
         gemma_temperature=_env_float("GEMMA_TEMPERATURE", 0.0),
         gemma_max_tokens=_env_int("GEMMA_MAX_TOKENS", 128),
         gemma_request_timeout_seconds=_env_float(
@@ -232,6 +233,7 @@ def load_config() -> AppConfig:
         webhook_url=_env("WEBHOOK_URL", "") or None,
         webhook_secret=_env("WEBHOOK_SECRET", "") or None,
         channels=channels,
+        groq_whisper_model=_env("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
     )
 
 
@@ -328,9 +330,9 @@ def _resolve_optional_path(value: str, root: Path) -> Path | None:
 
 def _normalize_tts_provider(value: str) -> str:
     provider = value.strip().lower()
-    if provider in {"google", "cartesia"}:
+    if provider in {"edge", "google", "cartesia"}:
         return provider
-    return "cartesia"
+    return "edge"
 
 
 def _normalize_language_mode(value: str) -> str:

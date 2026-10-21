@@ -5,26 +5,77 @@ interface UseSpeechDictationOptions {
   enabled: boolean;
   onResult: (text: string, confidence: number) => void;
   onInterim?: (text: string) => void;
+  /** Silence pause threshold in ms to wait before emitting a complete sentence (default: 750ms) */
+  silenceThresholdMs?: number;
+  /** Suppress microphone processing while peer's audio/TTS is playing to stop acoustic feedback echo */
+  duckDuringPlayback?: boolean;
 }
 
 /**
- * Continuous speech-to-text via Web Speech API.
- * Maps ISO language codes to BCP-47 tags where possible.
+ * Robust continuous speech-to-text via Web Speech API with Conversational Turn-Taking (VAD).
+ * Buffers spoken fragments into complete, coherent sentences and eliminates duplicate/stuttered output.
  */
-export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSpeechDictationOptions) {
+export function useSpeechDictation({
+  lang,
+  enabled,
+  onResult,
+  onInterim,
+  silenceThresholdMs = 750,
+  duckDuringPlayback = false,
+}: UseSpeechDictationOptions) {
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const onResultRef = useRef(onResult);
   const onInterimRef = useRef(onInterim);
   const enabledRef = useRef(enabled);
+  const duckRef = useRef(duckDuringPlayback);
   const permissionDeniedRef = useRef(false);
+
+  // Buffer state to assemble full sentences and prevent fragmented stutter
+  const accumulatedBufferRef = useRef<string>('');
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recentSentRef = useRef<{ text: string; time: number }[]>([]);
 
   onResultRef.current = onResult;
   onInterimRef.current = onInterim;
   enabledRef.current = enabled;
+  duckRef.current = duckDuringPlayback;
 
   const langTag = mapLang(lang);
+
+  const flushBuffer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    const raw = accumulatedBufferRef.current.trim();
+    accumulatedBufferRef.current = '';
+
+    if (!raw) return;
+
+    // Prune sentences older than 5 seconds from deduplication cache
+    const now = Date.now();
+    recentSentRef.current = recentSentRef.current.filter((item) => now - item.time < 5000);
+
+    // Normalize for deduplication check
+    const normalized = raw.toLowerCase().replace(/[.,!?;:।]/g, '').trim();
+
+    // Prevent re-emitting identical or overlapping substrings emitted within the last 5 seconds
+    const isDuplicate = recentSentRef.current.some((item) => {
+      const itemNorm = item.text.toLowerCase().replace(/[.,!?;:।]/g, '').trim();
+      return itemNorm === normalized || (itemNorm.endsWith(normalized) && normalized.length > 3);
+    });
+
+    if (isDuplicate) {
+      return;
+    }
+
+    recentSentRef.current.push({ text: raw, time: now });
+    onResultRef.current(raw, 0.95);
+    onInterimRef.current?.('');
+  }, []);
 
   useEffect(() => {
     const win = typeof window !== 'undefined' ? (window as any) : undefined;
@@ -48,6 +99,11 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
 
     recognition.onend = () => {
       setListening(false);
+      // Flush any lingering utterance before restarting
+      if (accumulatedBufferRef.current.trim()) {
+        flushBuffer();
+      }
+
       // Auto-restart while enabled and permission was not permanently denied
       if (enabledRef.current && !permissionDeniedRef.current && recognitionRef.current === recognition) {
         try {
@@ -66,23 +122,64 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
     };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let interim = '';
+      // If computer speaker is currently playing peer audio, drop input to stop acoustic loop
+      if (duckRef.current) {
+        return;
+      }
+
+      let currentInterim = '';
+      let newFinalPart = '';
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         const transcript = result[0]?.transcript ?? '';
         if (result.isFinal) {
-          const confidence = result[0]?.confidence ?? 0.9;
-          onResultRef.current(transcript.trim(), confidence);
+          newFinalPart += ' ' + transcript;
         } else {
-          interim += transcript;
+          currentInterim += transcript;
         }
       }
-      if (interim) onInterimRef.current?.(interim);
+
+      if (newFinalPart.trim()) {
+        const cleanedPart = newFinalPart.trim();
+        // Append to current sentence buffer
+        if (accumulatedBufferRef.current) {
+          // Avoid appending if already contains this chunk at the end
+          if (!accumulatedBufferRef.current.endsWith(cleanedPart)) {
+            accumulatedBufferRef.current = `${accumulatedBufferRef.current} ${cleanedPart}`.trim();
+          }
+        } else {
+          accumulatedBufferRef.current = cleanedPart;
+        }
+      }
+
+      // Emit visual live feedback for the speaker HUD
+      const livePreview = `${accumulatedBufferRef.current} ${currentInterim}`.trim();
+      if (livePreview) {
+        onInterimRef.current?.(livePreview);
+      }
+
+      // Reset turn-taking silence timer
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+
+      // If the buffer ends with sentence-ending punctuation and has substance, flush faster
+      const hasTerminalPunctuation = /[.!?।]\s*$/.test(accumulatedBufferRef.current);
+      const wordCount = accumulatedBufferRef.current.split(/\s+/).filter(Boolean).length;
+      const waitTime = hasTerminalPunctuation && wordCount >= 3 ? 350 : silenceThresholdMs;
+
+      silenceTimerRef.current = setTimeout(() => {
+        flushBuffer();
+      }, waitTime);
     };
 
     recognitionRef.current = recognition;
 
     return () => {
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
       recognitionRef.current = null;
       try {
         recognition.stop();
@@ -90,7 +187,7 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
         /* ignore */
       }
     };
-  }, [langTag]);
+  }, [langTag, flushBuffer, silenceThresholdMs]);
 
   useEffect(() => {
     const rec = recognitionRef.current;
@@ -110,6 +207,10 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
         /* ignore */
       }
       setListening(false);
+      accumulatedBufferRef.current = '';
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
     }
   }, [enabled, langTag]);
 

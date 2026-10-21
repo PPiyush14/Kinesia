@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 
 /**
  * Real microphone level meter via Web Audio API AnalyserNode.
- * Returns normalized 0–1 level and permission/error state.
+ * Binds strictly to the chosen deviceId and returns normalized 0–1 level.
  */
-export function useAudioMeter(active: boolean) {
+export function useAudioMeter(active: boolean, deviceId?: string) {
   const [level, setLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
@@ -24,12 +24,17 @@ export function useAudioMeter(active: boolean) {
 
     async function start() {
       try {
+        const audioConstraints: MediaTrackConstraints = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
+        if (deviceId && deviceId !== 'default') {
+          audioConstraints.deviceId = { exact: deviceId };
+        }
+
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
+          audio: audioConstraints,
         });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
@@ -53,17 +58,17 @@ export function useAudioMeter(active: boolean) {
           let sum = 0;
           for (let i = 0; i < data.length; i++) sum += data[i];
           const avg = sum / data.length / 255;
-          setLevel(Math.min(1, avg * 2.2));
+          setLevel(Math.min(1, avg * 2.5));
           rafRef.current = requestAnimationFrame(tick);
         };
         tick();
       } catch (err) {
         const msg =
           err instanceof DOMException && err.name === 'NotAllowedError'
-            ? 'Microphone permission denied'
+            ? 'Microphone permission denied by browser'
             : err instanceof Error
               ? err.message
-              : 'Microphone unavailable';
+              : 'Microphone hardware unavailable';
         setError(msg);
         setReady(false);
       }
@@ -75,7 +80,7 @@ export function useAudioMeter(active: boolean) {
       cancelled = true;
       cleanup();
     };
-  }, [active]);
+  }, [active, deviceId]);
 
   function cleanup() {
     if (rafRef.current) {

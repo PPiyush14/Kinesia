@@ -44,7 +44,6 @@ export function LobbyView({
   const [micEnabled, setMicEnabled] = useState(true);
   const [copiedCode, setCopiedCode] = useState(false);
   const [playingTestAudio, setPlayingTestAudio] = useState(false);
-  const { level, ready } = useAudioMeter(micEnabled);
   const {
     inputs,
     outputs,
@@ -53,7 +52,11 @@ export function LobbyView({
     changeInput,
     changeOutput,
     testSpeaker,
+    permissionDenied,
+    permissionError,
+    requestPermission,
   } = useAudioDevices();
+  const { level, ready, error: meterError } = useAudioMeter(micEnabled, selectedInput);
 
   const langOptions = SUPPORTED_LANGUAGES.map((l) => ({ value: l.code, label: `${l.name} (${l.short})` }));
 
@@ -162,6 +165,22 @@ export function LobbyView({
                 {micEnabled ? 'Mute' : 'Unmute'}
               </Button>
             </div>
+
+            {/* Permission blocked guidance */}
+            {(permissionDenied || meterError) && (
+              <div className="rounded-xl bg-danger-surface border border-danger-border p-3 text-xs text-danger space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold">Microphone Permission Blocked</span>
+                  <Button variant="danger" size="sm" onClick={() => void requestPermission()}>
+                    Retry Mic Access
+                  </Button>
+                </div>
+                <p className="text-2xs text-ink-muted leading-relaxed">
+                  Your browser is preventing Kinesia from accessing the microphone. 
+                  Click the <strong>lock / tune icon</strong> on the left side of your browser URL bar, set <strong>Microphone</strong> to <strong>Allow</strong>, and click &quot;Retry Mic Access&quot;.
+                </p>
+              </div>
+            )}
 
             {/* Dynamic Mic Selection if multiple devices found */}
             {inputs.length > 0 && (

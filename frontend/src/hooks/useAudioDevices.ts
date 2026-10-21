@@ -16,6 +16,8 @@ export function useAudioDevices() {
     () => (typeof localStorage !== 'undefined' && localStorage.getItem('kinesia_audio_output')) || 'default'
   );
   const [permissionGranted, setPermissionGranted] = useState(false);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
 
   const refreshDevices = useCallback(async () => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) return;
@@ -37,8 +39,10 @@ export function useAudioDevices() {
         }));
       setInputs(inDevices);
       setOutputs(outDevices);
-      if (inDevices.some((d) => d.label)) {
+      if (inDevices.some((d) => Boolean(d.label && d.label !== `Microphone 1`))) {
         setPermissionGranted(true);
+        setPermissionDenied(false);
+        setPermissionError(null);
       }
     } catch (err) {
       console.warn('Failed to enumerate audio devices', err);
@@ -51,19 +55,27 @@ export function useAudioDevices() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach((t) => t.stop());
       setPermissionGranted(true);
+      setPermissionDenied(false);
+      setPermissionError(null);
       await refreshDevices();
     } catch (err) {
-      console.warn('Microphone permission request failed or dismissed', err);
+      if (err instanceof DOMException && err.name === 'NotAllowedError') {
+        setPermissionDenied(true);
+        setPermissionError('Microphone permission is blocked in browser settings.');
+      } else {
+        setPermissionError(err instanceof Error ? err.message : 'Microphone unavailable');
+      }
+      setPermissionGranted(false);
     }
   }, [refreshDevices]);
 
   useEffect(() => {
-    void refreshDevices();
+    void requestPermission();
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices);
     return () => {
       navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices);
     };
-  }, [refreshDevices]);
+  }, [requestPermission, refreshDevices]);
 
   const changeInput = (deviceId: string) => {
     setSelectedInput(deviceId);
@@ -112,6 +124,8 @@ export function useAudioDevices() {
     refreshDevices,
     requestPermission,
     permissionGranted,
+    permissionDenied,
+    permissionError,
     testSpeaker,
   };
 }

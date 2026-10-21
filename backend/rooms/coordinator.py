@@ -75,8 +75,10 @@ class RoomCoordinator:
             logger.warning("EntityExtractor could not be loaded: %s", exc)
             self.entity_extractor = None
 
-        # Speech Synthesis
+        # Speech Synthesis & Transcription
         self.tts = TtsClient(config)
+        from backend.groq_whisper_client import GroqWhisperClient
+        self.stt = GroqWhisperClient(config)
 
     def get_or_load_room(self, room_code: str) -> RoomSession | None:
         """Fetch active room in memory or load from database."""
@@ -275,6 +277,33 @@ class RoomCoordinator:
                 except queue.Full:
                     logger.debug("Queue full for participant %s in room %s", uid, clean_code)
 
+    def process_audio_utterance(
+        self,
+        room_code: str,
+        speaker_id: str,
+        speaker_name: str,
+        audio_bytes: bytes,
+        source_lang: str,
+        mime_type: str = "audio/webm",
+    ) -> dict[str, Any]:
+        """Transcribe speech audio via Groq Whisper and fan out translations."""
+        transcribed_text = self.stt.transcribe(
+            audio_bytes,
+            language=source_lang,
+            filename="speech.webm" if "webm" in mime_type else "speech.wav",
+            mime_type=mime_type,
+        )
+        if not transcribed_text:
+            return {}
+        return self.process_utterance(
+            room_code=room_code,
+            speaker_id=speaker_id,
+            speaker_name=speaker_name,
+            text=transcribed_text,
+            source_lang=source_lang,
+            confidence=1.0,
+        )
+
     def process_utterance(
         self,
         room_code: str,
@@ -322,11 +351,11 @@ class RoomCoordinator:
                     listening_lang=source_lang,
                 )
 
-            # Determine distinct target languages needed by room participants
+            # Determine all distinct listening languages across room participants
             target_langs = {
                 p.listening_lang
                 for p in room.participants.values()
-                if p.listening_lang and p.listening_lang != source_lang
+                if p.listening_lang
             }
 
         # Create dummy channel configurations for translation prompts
@@ -335,8 +364,16 @@ class RoomCoordinator:
         translations: dict[str, str] = {source_lang: clean_text}
         audio_payloads: dict[str, str] = {}  # lang -> base64 data url
 
+        # Detect if incoming text is primarily Latin characters
+        has_latin_chars = any('a' <= ch.lower() <= 'z' for ch in clean_text)
+
         for target_lang in target_langs:
-            if target_lang == source_lang:
+            # If target language uses non-Latin script (Hindi, Marathi, etc.) but the text is Latin/English,
+            # or if target language is different from claimed source language, we MUST translate.
+            is_non_latin_target = target_lang in {"hi", "mr", "bn", "ta", "te", "gu", "kn", "ml", "pa", "ar", "ru", "ja", "ko", "zh"}
+            needs_translation = (target_lang != source_lang) or (is_non_latin_target and has_latin_chars)
+
+            if not needs_translation:
                 translations[target_lang] = clean_text
             else:
                 listener_ch = ChannelConfig(key="listener", name="Listener", source_language=target_lang, language_mode="fixed")
@@ -349,7 +386,7 @@ class RoomCoordinator:
                         target_lang,
                         source_lang,
                     )
-                    translations[target_lang] = translated
+                    translations[target_lang] = translated.strip() if translated else clean_text
                 except Exception as exc:
                     logger.warning("Translation to %s failed: %s", target_lang, exc)
                     translations[target_lang] = clean_text
@@ -366,7 +403,8 @@ class RoomCoordinator:
                 wav_bytes = self.tts.synthesize_for_language(translations[target_lang], synth_ch, target_lang)
                 if wav_bytes:
                     b64_audio = base64.b64encode(wav_bytes).decode("utf-8")
-                    audio_payloads[target_lang] = f"data:audio/wav;base64,{b64_audio}"
+                    mime = "audio/mpeg" if wav_bytes[:3] == b"ID3" or wav_bytes[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") else "audio/wav"
+                    audio_payloads[target_lang] = f"data:{mime};base64,{b64_audio}"
             except Exception as exc:
                 logger.debug("TTS synthesis failed for lang %s: %s", target_lang, exc)
 

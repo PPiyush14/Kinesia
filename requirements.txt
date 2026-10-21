@@ -1,5 +1,6 @@
 numpy>=1.26,<3
 google-cloud-texttospeech>=2.21,<3
+edge-tts>=7.0,<8
 python-dotenv>=1.0,<2
 requests>=2.32,<3
 sounddevice>=0.4.7,<1
