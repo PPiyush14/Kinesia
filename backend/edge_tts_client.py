@@ -3,23 +3,26 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 from typing import Any
 
 from backend.config import AppConfig, ChannelConfig
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EDGE_VOICES: dict[str, str] = {
-    "hi": "hi-IN-SwaraNeural",
-    "en": "en-IN-NeerjaNeural",
-    "mr": "mr-IN-AarohiNeural",
-    "bn": "bn-IN-TanishaaNeural",
-    "ta": "ta-IN-PallaviNeural",
-    "te": "te-IN-ShrutiNeural",
-    "gu": "gu-IN-DhwaniNeural",
-    "kn": "kn-IN-SapnaNeural",
-    "ml": "ml-IN-SobhanaNeural",
-    "pa": "pa-IN-GurpreetNeural",
+# Microsoft Azure Indian & Global Neural Voices (100% Free, Zero Key, Studio Quality)
+INDIAN_VOICES_FEMALE: dict[str, str] = {
+    "hi": "hi-IN-SwaraNeural",           # Hindi (Female, Warm & Natural)
+    "en": "en-IN-NeerjaExpressiveNeural", # Indian English (Female, Expressive)
+    "mr": "mr-IN-AarohiNeural",          # Marathi (Female)
+    "bn": "bn-IN-TanishaaNeural",        # Bengali (Female)
+    "ta": "ta-IN-PallaviNeural",         # Tamil (Female)
+    "te": "te-IN-ShrutiNeural",          # Telugu (Female)
+    "gu": "gu-IN-DhwaniNeural",          # Gujarati (Female)
+    "kn": "kn-IN-SapnaNeural",           # Kannada (Female)
+    "ml": "ml-IN-SobhanaNeural",         # Malayalam (Female)
+    "pa": "pa-IN-GurpreetNeural",        # Punjabi (Female)
+    "ur": "ur-IN-GulNeural",             # Urdu (Female)
     "es": "es-ES-ElviraNeural",
     "fr": "fr-FR-DeniseNeural",
     "de": "de-DE-KatjaNeural",
@@ -32,9 +35,34 @@ DEFAULT_EDGE_VOICES: dict[str, str] = {
     "ar": "ar-SA-ZariyahNeural",
 }
 
+INDIAN_VOICES_MALE: dict[str, str] = {
+    "hi": "hi-IN-MadhurNeural",          # Hindi (Male, Deep & Clear)
+    "en": "en-IN-PrabhatNeural",         # Indian English (Male)
+    "mr": "mr-IN-ManoharNeural",         # Marathi (Male)
+    "bn": "bn-IN-BashkarNeural",         # Bengali (Male)
+    "ta": "ta-IN-ValluvarNeural",        # Tamil (Male)
+    "te": "te-IN-MohanNeural",           # Telugu (Male)
+    "gu": "gu-IN-NiranjanNeural",        # Gujarati (Male)
+    "kn": "kn-IN-GaganNeural",           # Kannada (Male)
+    "ml": "ml-IN-MidhunNeural",          # Malayalam (Male)
+    "pa": "pa-IN-GurpreetNeural",        # Punjabi
+    "ur": "ur-IN-SalmanNeural",          # Urdu (Male)
+    "es": "es-ES-AlvaroNeural",
+    "fr": "fr-FR-HenriNeural",
+    "de": "de-DE-ConradNeural",
+    "it": "it-IT-DiegoNeural",
+    "pt": "pt-BR-AntonioNeural",
+    "ru": "ru-RU-DmitryNeural",
+    "ja": "ja-JP-KeitaNeural",
+    "ko": "ko-KR-InJoonNeural",
+    "zh": "zh-CN-YunjianNeural",
+    "ar": "ar-SA-HamedNeural",
+}
+
 
 class EdgeTtsClient:
     """100% Free, Unlimited Neural Text-to-Speech using Microsoft Edge Neural Voices.
+    Supports authentic Indian Hindi, Indian English, Marathi, Bengali, Tamil, Telugu, etc.
     Requires ZERO API keys, ZERO credit cards, and has NO credit limits.
     """
 
@@ -54,8 +82,15 @@ class EdgeTtsClient:
         if not clean:
             return b""
 
+        # Check gender preference from environment or channel (defaults to female)
+        gender = os.getenv("TTS_VOICE_GENDER", "female").lower().strip()
+        voice_map = INDIAN_VOICES_MALE if gender == "male" else INDIAN_VOICES_FEMALE
+
+        # If a specific custom voice is explicitly requested in env or channel
+        custom_voice = os.getenv("DEFAULT_TTS_VOICE", "").strip()
         lang_code = language.lower().split("-")[0].strip()
-        voice = DEFAULT_EDGE_VOICES.get(lang_code, "en-IN-NeerjaNeural")
+
+        voice = custom_voice or voice_map.get(lang_code, "en-IN-NeerjaExpressiveNeural")
 
         try:
             import edge_tts
