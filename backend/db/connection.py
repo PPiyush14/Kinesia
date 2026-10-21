@@ -117,6 +117,11 @@ def init_db() -> None:
     with _DB_LOCK:
         with get_db() as db:
             pg = db.is_pg
+            if pg:
+                try:
+                    db.raw_conn.autocommit = True
+                except Exception:
+                    pass
 
             bool_type = "BOOLEAN"
             real_type = "DOUBLE PRECISION" if pg else "REAL"
@@ -200,10 +205,21 @@ def init_db() -> None:
                 """
             )
 
-            # Migration: Ensure gender column exists on existing users table
+            # Migration: Ensure gender column exists
             try:
-                db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) DEFAULT 'female'")
-            except Exception:
-                pass
+                if pg:
+                    db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10) DEFAULT 'female'")
+                else:
+                    cols = [row["name"] for row in db.fetchall("PRAGMA table_info(users)")]
+                    if "gender" not in cols:
+                        db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) DEFAULT 'female'")
+            except Exception as e:
+                logger.debug("Migration check notice: %s", e)
+
+            if pg:
+                try:
+                    db.raw_conn.autocommit = False
+                except Exception:
+                    pass
 
             logger.info("Database initialized successfully (engine: %s)", "PostgreSQL" if pg else "SQLite")

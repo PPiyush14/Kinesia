@@ -12,6 +12,8 @@ import {
   Mic,
   Volume2,
   Play,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import type { User as UserType } from '@/types';
 import { SUPPORTED_LANGUAGES } from '@/types';
@@ -25,6 +27,7 @@ import { Card, CardContent, CardHeader } from '@/components/ui/Card';
 interface ProfileViewProps {
   user: UserType;
   onUserUpdated: (user: UserType) => void;
+  onAccountDeleted?: () => void;
   onBack: () => void;
   onToast: (msg: string, tone?: 'success' | 'error' | 'info') => void;
 }
@@ -40,7 +43,7 @@ const AVATAR_COLORS = [
   { name: 'Indigo', value: '#6366F1' },
 ];
 
-export function ProfileView({ user, onUserUpdated, onBack, onToast }: ProfileViewProps) {
+export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onToast }: ProfileViewProps) {
   const [displayName, setDisplayName] = useState(user.display_name || '');
   const [avatarColor, setAvatarColor] = useState(user.avatar_color || '#10B981');
   const [gender, setGender] = useState<'male' | 'female'>((user.gender as 'male' | 'female') || 'male');
@@ -48,6 +51,29 @@ export function ProfileView({ user, onUserUpdated, onBack, onToast }: ProfileVie
   const [outputLang, setOutputLang] = useState(user.default_output_lang || 'hi');
   const [saving, setSaving] = useState(false);
   const [fetching, setFetching] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const handleDeleteAccount = async () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await authService.deleteAccount();
+      onToast('Account permanently deleted', 'info');
+      if (onAccountDeleted) {
+        onAccountDeleted();
+      } else {
+        window.location.reload();
+      }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Failed to delete account', 'error');
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  };
 
   const {
     inputs,
@@ -402,6 +428,62 @@ export function ProfileView({ user, onUserUpdated, onBack, onToast }: ProfileVie
                     Test Speaker Output
                   </Button>
                 </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Danger Zone: Delete Account */}
+        <Card className="border border-red-500/20 bg-red-950/10 backdrop-blur-md">
+          <CardHeader className="border-b border-red-500/10 p-5 sm:p-6 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-red-400">
+              <AlertTriangle size={18} />
+              <h2 className="font-semibold text-base">Danger Zone</h2>
+            </div>
+          </CardHeader>
+          <CardContent className="p-5 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <h3 className="text-sm font-medium text-ink-primary">Delete Account</h3>
+                <p className="text-xs text-ink-muted">
+                  Permanently delete your profile, credentials, and room associations. This cannot be undone.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {confirmDelete ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setConfirmDelete(false)}
+                      className="text-xs"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      loading={deleting}
+                      onClick={handleDeleteAccount}
+                      leftIcon={<Trash2 size={14} />}
+                      className="bg-red-600 hover:bg-red-700 text-white border-0 text-xs shadow-md shadow-red-900/30"
+                    >
+                      Confirm Permanent Delete
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setConfirmDelete(true)}
+                    leftIcon={<Trash2 size={14} className="text-red-400" />}
+                    className="border-red-500/30 hover:bg-red-500/10 text-red-300 text-xs"
+                  >
+                    Delete Account
+                  </Button>
+                )}
               </div>
             </div>
           </CardContent>

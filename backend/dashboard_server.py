@@ -27,7 +27,7 @@ from backend.nlp.summarizer import ConversationSummarizer
 from backend.pipeline import TranslationRunResult, TranslatorPipeline
 from backend.session_state import SessionInfo, SessionLanguageStore
 from backend.storage.glossary import GlossaryStore
-from backend.db.auth import authenticate_user, get_user_profile, register_user, verify_token, update_user_profile
+from backend.db.auth import authenticate_user, get_user_profile, register_user, verify_token, update_user_profile, delete_user_account
 from backend.db.connection import init_db
 from backend.db.rooms import (
     create_room,
@@ -1460,6 +1460,19 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         parsed_url = urlparse(self.path)
         path = parsed_url.path
+
+        if path in {"/api/v1/auth/profile", "/api/v1/auth/account"}:
+            user = self._get_auth_user()
+            if not user:
+                self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                delete_user_account(user["id"])
+                self._send_v1_json({"ok": True, "message": "Account successfully deleted"})
+                return
+            except Exception as exc:
+                self._send_v1_error(f"Failed to delete account: {exc}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
 
         if path == "/api/v1/rooms/clear-all":
             user = self._get_auth_user()

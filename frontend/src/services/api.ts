@@ -79,6 +79,10 @@ export const authService = {
   }): Promise<User> {
     return apiCall<User>('/api/v1/auth/profile', 'PATCH', params, true);
   },
+
+  async deleteAccount(): Promise<{ ok: boolean; message?: string }> {
+    return apiCall<{ ok: boolean; message?: string }>('/api/v1/auth/profile', 'DELETE', null, true);
+  },
 };
 
 export const roomService = {

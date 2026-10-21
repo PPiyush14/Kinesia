@@ -355,6 +355,7 @@ export default function App() {
                 <ProfileView
                   user={user}
                   onUserUpdated={handleUserUpdated}
+                  onAccountDeleted={handleLogout}
                   onBack={() => setView('welcome')}
                   onToast={showToast}
                 />

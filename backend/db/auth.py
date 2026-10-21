@@ -275,3 +275,21 @@ def update_user_profile(
         db.execute(sql, (new_display, new_avatar, new_input, new_output, new_gender, user_id))
 
     return get_user_profile(user_id) or {}
+
+
+def delete_user_account(user_id: str) -> bool:
+    """Permanently delete a user account and associated room data (Full CRUD delete)."""
+    with get_db() as db:
+        # Delete room participants entries
+        db.execute("DELETE FROM room_participants WHERE user_id = ?", (user_id,))
+        # Find all rooms hosted by this user and clean them up
+        hosted_rooms = db.fetchall("SELECT id FROM rooms WHERE host_id = ?", (user_id,))
+        for r in hosted_rooms:
+            r_id = r["id"]
+            db.execute("DELETE FROM session_insights WHERE room_id = ?", (r_id,))
+            db.execute("DELETE FROM transcripts WHERE room_id = ?", (r_id,))
+            db.execute("DELETE FROM room_participants WHERE room_id = ?", (r_id,))
+            db.execute("DELETE FROM rooms WHERE id = ?", (r_id,))
+        # Finally delete user from users table
+        db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        return True
