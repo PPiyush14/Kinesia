@@ -3,6 +3,7 @@ export interface User {
   username: string;
   display_name: string;
   email?: string;
+  gender?: 'male' | 'female';
   avatar_color?: string;
   default_input_lang?: string;
   default_output_lang?: string;
@@ -36,6 +37,7 @@ export interface Participant {
   avatar_color?: string;
   speaking_lang?: string;
   listening_lang?: string;
+  gender?: 'male' | 'female';
   is_muted?: boolean;
 }
 

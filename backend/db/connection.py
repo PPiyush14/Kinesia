@@ -133,6 +133,7 @@ def init_db() -> None:
                     avatar_color VARCHAR(20) DEFAULT '#10B981',
                     default_input_lang VARCHAR(10) DEFAULT 'en',
                     default_output_lang VARCHAR(10) DEFAULT 'hi',
+                    gender VARCHAR(10) DEFAULT 'female',
                     created_at {real_type} NOT NULL
                 )
                 """
@@ -198,5 +199,11 @@ def init_db() -> None:
                 )
                 """
             )
+
+            # Migration: Ensure gender column exists on existing users table
+            try:
+                db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) DEFAULT 'female'")
+            except Exception:
+                pass
 
             logger.info("Database initialized successfully (engine: %s)", "PostgreSQL" if pg else "SQLite")

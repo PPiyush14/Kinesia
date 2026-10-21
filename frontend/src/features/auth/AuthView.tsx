@@ -28,6 +28,7 @@ export function AuthView({ pendingRoomCode, onAuthenticated, onToast }: AuthView
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
+  const [gender, setGender] = useState<'male' | 'female'>('male');
   const [inputLang, setInputLang] = useState('en');
   const [outputLang, setOutputLang] = useState('hi');
 
@@ -73,6 +74,7 @@ export function AuthView({ pendingRoomCode, onAuthenticated, onToast }: AuthView
         password: regPassword,
         default_input_lang: inputLang,
         default_output_lang: outputLang,
+        gender,
       });
       const token = res.token || (res as any).data?.token;
       const user = res.user || (res as any).data?.user || res;
@@ -254,6 +256,40 @@ export function AuthView({ pendingRoomCode, onAuthenticated, onToast }: AuthView
                   onChange={(e) => setOutputLang(e.target.value)}
                   options={langOptions}
                 />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-ink-secondary">
+                  Voice Tone (Gender) <span className="text-accent">*</span>
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setGender('male')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-medium flex items-center justify-center gap-2 transition-all ${
+                      gender === 'male'
+                        ? 'border-accent bg-accent/15 text-ink-primary shadow-sm ring-1 ring-accent'
+                        : 'border-border bg-surface-2/60 text-ink-muted hover:text-ink-primary'
+                    }`}
+                  >
+                    <span>👨</span>
+                    <span>Male Voice</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGender('female')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-medium flex items-center justify-center gap-2 transition-all ${
+                      gender === 'female'
+                        ? 'border-accent bg-accent/15 text-ink-primary shadow-sm ring-1 ring-accent'
+                        : 'border-border bg-surface-2/60 text-ink-muted hover:text-ink-primary'
+                    }`}
+                  >
+                    <span>👩</span>
+                    <span>Female Voice</span>
+                  </button>
+                </div>
+                <p className="text-2xs text-ink-muted">
+                  Sets your natural Indian/English AI voice tone when speaking to others.
+                </p>
               </div>
               <Button type="submit" className="w-full mt-2" size="lg" loading={loading} rightIcon={<ArrowRight size={16} />}>
                 Create account

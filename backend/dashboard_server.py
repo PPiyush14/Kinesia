@@ -1341,6 +1341,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     display_name=payload.get("display_name"),
                     default_input_lang=payload.get("default_input_lang", "en"),
                     default_output_lang=payload.get("default_output_lang", "hi"),
+                    gender=payload.get("gender", "female"),
                 )
             elif path == "/api/v1/auth/login":
                 response = authenticate_user(
@@ -1526,12 +1527,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 avatar_color = payload.get("avatar_color")
                 default_input_lang = payload.get("default_input_lang")
                 default_output_lang = payload.get("default_output_lang")
+                gender = payload.get("gender")
                 updated = update_user_profile(
                     user["id"],
                     display_name=display_name,
                     avatar_color=avatar_color,
                     default_input_lang=default_input_lang,
                     default_output_lang=default_output_lang,
+                    gender=gender,
                 )
                 self._send_v1_json(updated)
                 return

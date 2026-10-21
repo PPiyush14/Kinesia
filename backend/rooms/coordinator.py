@@ -44,6 +44,7 @@ class ParticipantSession:
     avatar_color: str
     speaking_lang: str
     listening_lang: str
+    gender: str = "female"
     is_muted: bool = False
     event_queue: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=100))
 
@@ -116,6 +117,8 @@ class RoomCoordinator:
         user_name = user_profile.get("display_name") or user_profile.get("username", "Guest")
         avatar_color = user_profile.get("avatar_color", "#10B981")
 
+        user_gender = user_profile.get("gender") or "female"
+
         with self._lock:
             participant = ParticipantSession(
                 user_id=user_id,
@@ -123,6 +126,7 @@ class RoomCoordinator:
                 avatar_color=avatar_color,
                 speaking_lang=speaking_lang,
                 listening_lang=listening_lang,
+                gender=user_gender,
             )
             room.participants[user_id] = participant
 
@@ -143,6 +147,7 @@ class RoomCoordinator:
                     "avatar_color": p.avatar_color,
                     "speaking_lang": p.speaking_lang,
                     "listening_lang": p.listening_lang,
+                    "gender": getattr(p, "gender", "female"),
                     "is_muted": p.is_muted,
                 }
                 for p in room.participants.values()
@@ -349,6 +354,7 @@ class RoomCoordinator:
                     avatar_color=(u_prof or {}).get("avatar_color", "#10B981"),
                     speaking_lang=source_lang,
                     listening_lang=source_lang,
+                    gender=(u_prof or {}).get("gender", "female"),
                 )
 
             # Determine all distinct listening languages across room participants
@@ -391,7 +397,13 @@ class RoomCoordinator:
                     logger.warning("Translation to %s failed: %s", target_lang, exc)
                     translations[target_lang] = clean_text
 
-            # Synthesize speech for this language
+            # Synthesize speech for this language matching the speaker's gender
+            speaker_gender = "female"
+            with self._lock:
+                spk_p = room.participants.get(speaker_id)
+                if spk_p and getattr(spk_p, "gender", None):
+                    speaker_gender = spk_p.gender
+
             try:
                 synth_ch = ChannelConfig(
                     key="synth",
@@ -400,7 +412,12 @@ class RoomCoordinator:
                     language_mode="fixed",
                     cartesia_voice_id=self.config.channels.get("1", speaker_ch).cartesia_voice_id,
                 )
-                wav_bytes = self.tts.synthesize_for_language(translations[target_lang], synth_ch, target_lang)
+                wav_bytes = self.tts.synthesize_for_language(
+                    translations[target_lang],
+                    synth_ch,
+                    target_lang,
+                    gender=speaker_gender,
+                )
                 if wav_bytes:
                     b64_audio = base64.b64encode(wav_bytes).decode("utf-8")
                     mime = "audio/mpeg" if wav_bytes[:3] == b"ID3" or wav_bytes[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") else "audio/wav"

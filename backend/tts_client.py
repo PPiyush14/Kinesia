@@ -35,6 +35,7 @@ class TtsClient:
         text: str,
         channel: ChannelConfig,
         language: str,
+        gender: str = "female",
     ) -> bytes:
         try:
             audio = self._client.synthesize_for_language(text, channel, language)
@@ -42,4 +43,4 @@ class TtsClient:
                 return audio
         except Exception as exc:
             logger.debug("Primary TTS failed for %s, falling back to free Edge-TTS: %s", language, exc)
-        return self._edge.synthesize_for_language(text, channel, language)
+        return self._edge.synthesize_for_language(text, channel, language, gender=gender)

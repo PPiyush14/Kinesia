@@ -113,6 +113,7 @@ def register_user(
     display_name: str | None = None,
     default_input_lang: str = "en",
     default_output_lang: str = "hi",
+    gender: str = "female",
 ) -> dict[str, Any]:
     """Register a new user account.
 
@@ -122,6 +123,9 @@ def register_user(
     clean_username = username.strip().lower()
     clean_email = email.strip().lower()
     clean_display = (display_name or username).strip()
+    clean_gender = (gender or "female").strip().lower()
+    if clean_gender not in {"male", "female"}:
+        clean_gender = "female"
 
     if not clean_username or len(clean_username) < 3:
         raise ValueError("Username must be at least 3 characters long.")
@@ -150,8 +154,8 @@ def register_user(
             """
             INSERT INTO users (
                 id, username, email, password_hash, salt, display_name,
-                avatar_color, default_input_lang, default_output_lang, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                avatar_color, default_input_lang, default_output_lang, gender, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -163,6 +167,7 @@ def register_user(
                 chosen_color,
                 default_input_lang,
                 default_output_lang,
+                clean_gender,
                 now,
             ),
         )
@@ -176,6 +181,7 @@ def register_user(
         "avatar_color": chosen_color,
         "default_input_lang": default_input_lang,
         "default_output_lang": default_output_lang,
+        "gender": clean_gender,
         "created_at": now,
     }
     result = dict(user_dict)
@@ -198,7 +204,7 @@ def authenticate_user(login_id: str, password: str) -> dict[str, Any]:
         user = db.fetchone(
             """
             SELECT id, username, email, password_hash, salt, display_name,
-                   avatar_color, default_input_lang, default_output_lang, created_at
+                   avatar_color, default_input_lang, default_output_lang, gender, created_at
             FROM users
             WHERE username = ? OR email = ?
             """,
@@ -220,6 +226,7 @@ def authenticate_user(login_id: str, password: str) -> dict[str, Any]:
         "avatar_color": user["avatar_color"],
         "default_input_lang": user["default_input_lang"],
         "default_output_lang": user["default_output_lang"],
+        "gender": user.get("gender") or "female",
         "created_at": user["created_at"],
     }
 
@@ -232,7 +239,7 @@ def get_user_profile(user_id: str) -> dict[str, Any] | None:
         user = db.fetchone(
             """
             SELECT id, username, email, display_name, avatar_color,
-                   default_input_lang, default_output_lang, created_at
+                   default_input_lang, default_output_lang, gender, created_at
             FROM users
             WHERE id = ?
             """,
@@ -248,6 +255,7 @@ def update_user_profile(
     avatar_color: str | None = None,
     default_input_lang: str | None = None,
     default_output_lang: str | None = None,
+    gender: str | None = None,
 ) -> dict[str, Any]:
     """Update user profile fields and return updated profile."""
     current = get_user_profile(user_id)
@@ -258,9 +266,12 @@ def update_user_profile(
     new_avatar = avatar_color.strip() if avatar_color and avatar_color.strip() else current.get("avatar_color", "#10B981")
     new_input = default_input_lang.strip() if default_input_lang and default_input_lang.strip() else current.get("default_input_lang", "en")
     new_output = default_output_lang.strip() if default_output_lang and default_output_lang.strip() else current.get("default_output_lang", "hi")
+    new_gender = (gender or current.get("gender") or "female").strip().lower()
+    if new_gender not in {"male", "female"}:
+        new_gender = current.get("gender") or "female"
 
-    sql = "UPDATE users SET display_name = ?, avatar_color = ?, default_input_lang = ?, default_output_lang = ? WHERE id = ?"
+    sql = "UPDATE users SET display_name = ?, avatar_color = ?, default_input_lang = ?, default_output_lang = ?, gender = ? WHERE id = ?"
     with get_db() as db:
-        db.execute(sql, (new_display, new_avatar, new_input, new_output, user_id))
+        db.execute(sql, (new_display, new_avatar, new_input, new_output, new_gender, user_id))
 
     return get_user_profile(user_id) or {}

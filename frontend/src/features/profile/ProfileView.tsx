@@ -43,6 +43,7 @@ const AVATAR_COLORS = [
 export function ProfileView({ user, onUserUpdated, onBack, onToast }: ProfileViewProps) {
   const [displayName, setDisplayName] = useState(user.display_name || '');
   const [avatarColor, setAvatarColor] = useState(user.avatar_color || '#10B981');
+  const [gender, setGender] = useState<'male' | 'female'>((user.gender as 'male' | 'female') || 'male');
   const [inputLang, setInputLang] = useState(user.default_input_lang || 'en');
   const [outputLang, setOutputLang] = useState(user.default_output_lang || 'hi');
   const [saving, setSaving] = useState(false);
@@ -71,6 +72,7 @@ export function ProfileView({ user, onUserUpdated, onBack, onToast }: ProfileVie
         if (!mounted) return;
         setDisplayName(freshUser.display_name || freshUser.username);
         setAvatarColor(freshUser.avatar_color || '#10B981');
+        if (freshUser.gender) setGender(freshUser.gender as 'male' | 'female');
         if (freshUser.default_input_lang) setInputLang(freshUser.default_input_lang);
         if (freshUser.default_output_lang) setOutputLang(freshUser.default_output_lang);
       })
@@ -103,6 +105,7 @@ export function ProfileView({ user, onUserUpdated, onBack, onToast }: ProfileVie
       const updated = await authService.updateProfile({
         display_name: displayName.trim(),
         avatar_color: avatarColor,
+        gender: gender,
         default_input_lang: inputLang,
         default_output_lang: outputLang,
       });
@@ -267,6 +270,64 @@ export function ProfileView({ user, onUserUpdated, onBack, onToast }: ProfileVie
                   The translated speech dialect you wish to read and hear in real-time.
                 </p>
               </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* AI Voice Tone Preference Card */}
+        <Card className="border border-border bg-surface-1/90 backdrop-blur-md">
+          <CardHeader className="border-b border-border-subtle p-5 sm:p-6">
+            <div className="flex items-center gap-2">
+              <Sparkles size={18} className="text-accent" />
+              <h2 className="font-semibold text-ink-primary text-base">AI Speech Voice Tone</h2>
+            </div>
+          </CardHeader>
+          <CardContent className="p-5 sm:p-6 space-y-4">
+            <p className="text-xs text-ink-muted">
+              Select your voice preference. When you speak, other participants in the room will hear your translated speech rendered in this voice tone.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <button
+                type="button"
+                onClick={() => setGender('male')}
+                className={`p-4 rounded-2xl border text-left flex items-start gap-3.5 transition-all ${
+                  gender === 'male'
+                    ? 'border-accent bg-accent/15 ring-2 ring-accent text-ink-primary shadow-lg shadow-accent/5'
+                    : 'border-border bg-surface-2/60 text-ink-muted hover:border-border-subtle hover:text-ink-primary'
+                }`}
+              >
+                <span className="text-2xl mt-0.5">👨</span>
+                <div className="space-y-0.5">
+                  <div className="text-sm font-semibold text-ink-primary flex items-center gap-2">
+                    Male Voice
+                    {gender === 'male' && <Check size={14} className="text-accent" />}
+                  </div>
+                  <p className="text-xs text-ink-muted">
+                    Deep, clear Indian & English voice (Madhur / Prabhat Neural)
+                  </p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setGender('female')}
+                className={`p-4 rounded-2xl border text-left flex items-start gap-3.5 transition-all ${
+                  gender === 'female'
+                    ? 'border-accent bg-accent/15 ring-2 ring-accent text-ink-primary shadow-lg shadow-accent/5'
+                    : 'border-border bg-surface-2/60 text-ink-muted hover:border-border-subtle hover:text-ink-primary'
+                }`}
+              >
+                <span className="text-2xl mt-0.5">👩</span>
+                <div className="space-y-0.5">
+                  <div className="text-sm font-semibold text-ink-primary flex items-center gap-2">
+                    Female Voice
+                    {gender === 'female' && <Check size={14} className="text-accent" />}
+                  </div>
+                  <p className="text-xs text-ink-muted">
+                    Natural, warm Indian & English voice (Swara / Neerja Neural)
+                  </p>
+                </div>
+              </button>
             </div>
           </CardContent>
         </Card>
