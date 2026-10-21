@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.26,<3",
     "google-cloud-texttospeech>=2.21,<3",
+    "edge-tts>=7.0,<8",
     "python-dotenv>=1.0,<2",
     "requests>=2.32,<3",
     "sounddevice>=0.4.7,<1",
@@ -28,6 +29,7 @@ dependencies = [
     "sacrebleu>=2.4,<3",
     "jiwer>=3.0,<5",
     "matplotlib>=3.9,<4",
+    "psycopg2-binary>=2.9.9",
 ]
 
 [project.optional-dependencies]

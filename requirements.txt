@@ -10,3 +10,4 @@ spacy>=3.7,<4
 sacrebleu>=2.4,<3
 jiwer>=3.0,<5
 matplotlib>=3.9,<4
+psycopg2-binary>=2.9.9
