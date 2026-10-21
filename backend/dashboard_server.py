@@ -1071,17 +1071,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = False
 
-        participants_list = [
-            {
-                "user_id": p.user_id,
-                "user_name": p.user_name,
-                "avatar_color": p.avatar_color,
-                "speaking_lang": p.speaking_lang,
-                "listening_lang": p.listening_lang,
-                "is_muted": p.is_muted,
-            }
-            for p in room.participants.values()
-        ]
+        with self.state.coordinator._lock:
+            participants_list = [
+                {
+                    "user_id": p.user_id,
+                    "user_name": p.user_name,
+                    "avatar_color": p.avatar_color,
+                    "speaking_lang": p.speaking_lang,
+                    "listening_lang": p.listening_lang,
+                    "is_muted": p.is_muted,
+                }
+                for p in room.participants.values()
+            ]
 
         init_event = {
             "type": "connected",
@@ -1226,19 +1227,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
                     return
                 coord_room = self.state.coordinator.active_rooms.get(room_code.lower())
-                if coord_room and coord_room.participants:
-                    participants = [
-                        {
-                            "user_id": p.user_id,
-                            "user_name": p.user_name,
-                            "avatar_color": p.avatar_color,
-                            "speaking_lang": p.speaking_lang,
-                            "listening_lang": p.listening_lang,
-                            "is_muted": p.is_muted,
-                        }
-                        for p in coord_room.participants.values()
-                    ]
-                else:
+                participants = []
+                if coord_room:
+                    with self.state.coordinator._lock:
+                        if coord_room.participants:
+                            participants = [
+                                {
+                                    "user_id": p.user_id,
+                                    "user_name": p.user_name,
+                                    "avatar_color": p.avatar_color,
+                                    "speaking_lang": p.speaking_lang,
+                                    "listening_lang": p.listening_lang,
+                                    "is_muted": p.is_muted,
+                                }
+                                for p in coord_room.participants.values()
+                            ]
+                if not participants:
                     participants = list_active_participants(room["id"])
                 self._send_v1_json(participants)
                 return

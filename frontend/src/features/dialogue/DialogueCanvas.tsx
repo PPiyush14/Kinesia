@@ -105,13 +105,24 @@ export function DialogueCanvas({
               deduped.push(item);
             }
           }
+          const myId = String(currentUser.id);
+          if (!deduped.some((p) => String(p.user_id) === myId)) {
+            deduped.unshift({
+              user_id: currentUser.id,
+              user_name: currentUser.display_name || currentUser.username,
+              avatar_color: currentUser.avatar_color || '#10B981',
+              speaking_lang: speakingLang,
+              listening_lang: listeningLang,
+              is_muted: isMicMuted,
+            });
+          }
           setParticipants(deduped);
         }
       })
       .catch((err) => {
         console.warn('Could not fetch initial participants', err);
       });
-  }, [room.room_code]);
+  }, [room.room_code, currentUser, speakingLang, listeningLang, isMicMuted]);
 
   // Audio queue for incoming TTS
   const playAudio = useCallback(
@@ -187,6 +198,17 @@ export function DialogueCanvas({
               seen.add(sid);
               deduped.push(item);
             }
+          }
+          const myId = String(currentUser.id);
+          if (!deduped.some((p) => String(p.user_id) === myId)) {
+            deduped.unshift({
+              user_id: currentUser.id,
+              user_name: currentUser.display_name || currentUser.username,
+              avatar_color: currentUser.avatar_color || '#10B981',
+              speaking_lang: speakingLang,
+              listening_lang: listeningLang,
+              is_muted: isMicMuted,
+            });
           }
           setParticipants(deduped);
         }

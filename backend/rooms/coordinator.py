@@ -133,18 +133,20 @@ class RoomCoordinator:
                 listening_lang=listening_lang,
             )
 
-        # Broadcast full updated participant list to all room members
-        participants_list = [
-            {
-                "user_id": p.user_id,
-                "user_name": p.user_name,
-                "avatar_color": p.avatar_color,
-                "speaking_lang": p.speaking_lang,
-                "listening_lang": p.listening_lang,
-                "is_muted": p.is_muted,
-            }
-            for p in room.participants.values()
-        ]
+            # Broadcast full updated participant list to all room members
+            participants_list = [
+                {
+                    "user_id": p.user_id,
+                    "user_name": p.user_name,
+                    "avatar_color": p.avatar_color,
+                    "speaking_lang": p.speaking_lang,
+                    "listening_lang": p.listening_lang,
+                    "is_muted": p.is_muted,
+                }
+                for p in room.participants.values()
+            ]
+            part_count = len(room.participants)
+
         self.broadcast_event(
             room_code,
             "participants",
@@ -160,7 +162,7 @@ class RoomCoordinator:
                 "speaking_lang": speaking_lang,
                 "listening_lang": listening_lang,
                 "is_muted": False,
-                "participant_count": len(room.participants),
+                "participant_count": part_count,
             },
             exclude_user_id=user_id,
         )
