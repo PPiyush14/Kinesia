@@ -17,8 +17,12 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const onResultRef = useRef(onResult);
   const onInterimRef = useRef(onInterim);
+  const enabledRef = useRef(enabled);
+  const permissionDeniedRef = useRef(false);
+
   onResultRef.current = onResult;
   onInterimRef.current = onInterim;
+  enabledRef.current = enabled;
 
   const langTag = mapLang(lang);
 
@@ -37,11 +41,15 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
     recognition.lang = langTag;
     recognition.maxAlternatives = 1;
 
-    recognition.onstart = () => setListening(true);
+    recognition.onstart = () => {
+      setListening(true);
+      permissionDeniedRef.current = false;
+    };
+
     recognition.onend = () => {
       setListening(false);
-      // Auto-restart while enabled
-      if (enabled && recognitionRef.current === recognition) {
+      // Auto-restart while enabled and permission was not permanently denied
+      if (enabledRef.current && !permissionDeniedRef.current && recognitionRef.current === recognition) {
         try {
           recognition.start();
         } catch {
@@ -49,7 +57,13 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
         }
       }
     };
-    recognition.onerror = () => setListening(false);
+
+    recognition.onerror = (event: any) => {
+      if (event && (event.error === 'not-allowed' || event.error === 'service-not-allowed')) {
+        permissionDeniedRef.current = true;
+      }
+      setListening(false);
+    };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       let interim = '';
@@ -82,6 +96,7 @@ export function useSpeechDictation({ lang, enabled, onResult, onInterim }: UseSp
     const rec = recognitionRef.current;
     if (!rec) return;
     if (enabled) {
+      permissionDeniedRef.current = false;
       try {
         rec.lang = langTag;
         rec.start();
@@ -117,9 +132,20 @@ export function mapLang(code: string): string {
     te: 'te-IN',
     bn: 'bn-IN',
     ta: 'ta-IN',
+    gu: 'gu-IN',
+    kn: 'kn-IN',
+    ml: 'ml-IN',
+    pa: 'pa-IN',
     es: 'es-ES',
     fr: 'fr-FR',
     de: 'de-DE',
+    it: 'it-IT',
+    pt: 'pt-BR',
+    ru: 'ru-RU',
+    ja: 'ja-JP',
+    ko: 'ko-KR',
+    zh: 'zh-CN',
+    ar: 'ar-SA',
   };
   return map[code] ?? code;
 }

@@ -1078,6 +1078,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "avatar_color": p.avatar_color,
                 "speaking_lang": p.speaking_lang,
                 "listening_lang": p.listening_lang,
+                "is_muted": p.is_muted,
             }
             for p in room.participants.values()
         ]
@@ -1233,6 +1234,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                             "avatar_color": p.avatar_color,
                             "speaking_lang": p.speaking_lang,
                             "listening_lang": p.listening_lang,
+                            "is_muted": p.is_muted,
                         }
                         for p in coord_room.participants.values()
                     ]
@@ -1377,6 +1379,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 room_code = path.split("/")[4]
                 self.state.coordinator.leave_room(room_code, user["id"])
                 response = {"ok": True, "left": True}
+            elif path.startswith("/api/v1/rooms/") and path.endswith("/languages"):
+                user = self._get_auth_user()
+                if not user:
+                    self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                    return
+                room_code = path.split("/")[4]
+                updated_list = self.state.coordinator.update_participant_status(
+                    room_code=room_code,
+                    user_id=user["id"],
+                    speaking_lang=payload.get("speaking_lang"),
+                    listening_lang=payload.get("listening_lang"),
+                    is_muted=payload.get("is_muted"),
+                )
+                response = {"ok": True, "participants": updated_list}
             elif path.startswith("/api/v1/rooms/") and path.endswith("/end"):
                 user = self._get_auth_user()
                 if not user:

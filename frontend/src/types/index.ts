@@ -36,6 +36,7 @@ export interface Participant {
   avatar_color?: string;
   speaking_lang?: string;
   listening_lang?: string;
+  is_muted?: boolean;
 }
 
 export interface TranscriptTurn {

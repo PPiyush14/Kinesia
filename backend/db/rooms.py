@@ -174,10 +174,15 @@ def add_participant(
     speaking_lang: str = "en",
     listening_lang: str = "hi",
 ) -> dict[str, Any]:
-    """Register participant entering a room."""
+    """Register participant entering a room, closing any dangling previous sessions."""
     participant_id = str(uuid.uuid4())
     now = time.time()
     with get_db() as db:
+        # Close any lingering prior open entry for this user in this room
+        db.execute(
+            "UPDATE room_participants SET left_at = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
+            (now, room_id, user_id),
+        )
         db.execute(
             """
             INSERT INTO room_participants (
@@ -208,8 +213,33 @@ def remove_participant(room_id: str, user_id: str) -> None:
         )
 
 
+def update_participant_languages(
+    room_id: str,
+    user_id: str,
+    speaking_lang: str | None = None,
+    listening_lang: str | None = None,
+) -> None:
+    """Update participant dialect settings in active room session."""
+    updates = []
+    params = []
+    if speaking_lang:
+        updates.append("speaking_lang = ?")
+        params.append(speaking_lang)
+    if listening_lang:
+        updates.append("listening_lang = ?")
+        params.append(listening_lang)
+    if not updates:
+        return
+    params.extend([room_id, user_id])
+    with get_db() as db:
+        db.execute(
+            f"UPDATE room_participants SET {', '.join(updates)} WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
+            tuple(params),
+        )
+
+
 def list_active_participants(room_id: str) -> list[dict[str, Any]]:
-    """Return all active participants currently in a room."""
+    """Return all active participants currently in a room (deduplicated by user)."""
     with get_db() as db:
         rows = db.fetchall(
             """
@@ -222,7 +252,14 @@ def list_active_participants(room_id: str) -> list[dict[str, Any]]:
             """,
             (room_id,),
         )
-    return rows
+    seen = set()
+    deduped = []
+    for r in rows:
+        uid = str(r["user_id"])
+        if uid not in seen:
+            seen.add(uid)
+            deduped.append(r)
+    return deduped
 
 
 def add_transcript(

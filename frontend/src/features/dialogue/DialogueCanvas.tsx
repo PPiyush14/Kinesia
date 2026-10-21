@@ -15,6 +15,7 @@ import {
   Trash2,
   AlertTriangle,
   LogOut,
+  Copy,
 } from 'lucide-react';
 import type { Participant, Room, TranscriptTurn, User, SessionInsights } from '@/types';
 import { SUPPORTED_LANGUAGES, langShort } from '@/types';
@@ -95,7 +96,16 @@ export function DialogueCanvas({
       .getParticipants(room.room_code)
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {
-          setParticipants(data);
+          const seen = new Set<string>();
+          const deduped: Participant[] = [];
+          for (const item of data) {
+            const sid = String(item.user_id);
+            if (!seen.has(sid)) {
+              seen.add(sid);
+              deduped.push(item);
+            }
+          }
+          setParticipants(deduped);
         }
       })
       .catch((err) => {
@@ -138,12 +148,13 @@ export function DialogueCanvas({
       if (subtitleTimerRef.current) clearTimeout(subtitleTimerRef.current);
       subtitleTimerRef.current = setTimeout(() => setActiveSubtitle(null), 6000);
 
-      if (turn.audio_data_url) {
+      const isMe = String(turn.speaker_id) === String(currentUser.id);
+      if (turn.audio_data_url && !isMe) {
         playAudio(turn.audio_data_url);
       } else if (
         !isAudioMuted &&
         turn.localized_text &&
-        String(turn.speaker_id) !== String(currentUser.id) &&
+        !isMe &&
         typeof window !== 'undefined' &&
         'speechSynthesis' in window
       ) {
@@ -168,7 +179,16 @@ export function DialogueCanvas({
       onTurn: handleTranscriptTurn,
       onParticipants: (list: Participant[]) => {
         if (Array.isArray(list) && list.length > 0) {
-          setParticipants(list);
+          const seen = new Set<string>();
+          const deduped: Participant[] = [];
+          for (const item of list) {
+            const sid = String(item.user_id);
+            if (!seen.has(sid)) {
+              seen.add(sid);
+              deduped.push(item);
+            }
+          }
+          setParticipants(deduped);
         }
       },
       onParticipantJoined: (p: Participant) => {
@@ -233,6 +253,11 @@ export function DialogueCanvas({
       transcriptScrollRef.current.scrollTop = transcriptScrollRef.current.scrollHeight;
     }
   }, [drawerOpen, transcripts]);
+
+  const handleListeningLangChange = (newLang: string) => {
+    onUpdateListeningLang(newLang);
+    roomService.updateLanguages(room.room_code, { listening_lang: newLang }).catch(() => {});
+  };
 
   const handleSendText = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -338,8 +363,8 @@ export function DialogueCanvas({
             <Languages size={14} className="text-ink-muted" />
             <select
               value={listeningLang}
-              onChange={(e) => onUpdateListeningLang(e.target.value)}
-              className="h-8 rounded-lg bg-surface-2 border border-border text-2xs text-ink-secondary px-2 focus:outline-none focus:border-accent/50"
+              onChange={(e) => handleListeningLangChange(e.target.value)}
+              className="h-8 rounded-lg bg-surface-2 border border-border text-2xs text-ink-secondary px-2 focus:outline-none focus:border-accent/50 cursor-pointer"
             >
               {SUPPORTED_LANGUAGES.map((l) => (
                 <option key={l.code} value={l.code}>
@@ -357,13 +382,14 @@ export function DialogueCanvas({
           className={cn(
             'w-full max-w-4xl grid gap-4 sm:gap-5',
             participants.length <= 1 && 'max-w-md',
-            participants.length === 2 && 'grid-cols-2 max-w-2xl',
+            participants.length === 2 && 'grid-cols-1 sm:grid-cols-2 max-w-2xl',
             participants.length >= 3 && 'grid-cols-2 sm:grid-cols-3'
           )}
         >
           {participants.map((p) => {
-            const isSpeaking = speakingUserId === p.user_id;
-            const isMe = p.user_id === currentUser.id;
+            const isSpeaking = speakingUserId != null && String(speakingUserId) === String(p.user_id);
+            const isMe = String(p.user_id) === String(currentUser.id);
+            const isMuted = isMe ? isMicMuted : Boolean(p.is_muted);
 
             return (
               <motion.div
@@ -382,6 +408,14 @@ export function DialogueCanvas({
                   {isSpeaking && (
                     <span className="absolute -inset-1 rounded-2xl border-2 border-accent animate-ping-soft" />
                   )}
+                  {isMuted && (
+                    <span
+                      title="Microphone is muted"
+                      className="absolute -bottom-1 -right-1 h-5 w-5 rounded-full bg-danger text-white flex items-center justify-center shadow-sm"
+                    >
+                      <MicOff size={11} />
+                    </span>
+                  )}
                 </div>
                 <div className="text-center min-w-0 max-w-full">
                   <span className="text-sm font-semibold text-ink-primary block truncate">
@@ -397,6 +431,28 @@ export function DialogueCanvas({
             );
           })}
         </div>
+
+        {/* Waiting indicator when alone in room */}
+        {participants.length <= 1 && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-6 flex flex-col items-center gap-2 text-center"
+          >
+            <div className="flex items-center gap-2 rounded-full bg-surface-2 border border-border px-3.5 py-1.5 text-xs text-ink-muted">
+              <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
+              <span>Waiting for others to join...</span>
+            </div>
+            <button
+              type="button"
+              onClick={onCopyInvite}
+              className="text-xs text-accent hover:underline flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Copy size={13} />
+              <span>Copy invite link ({room.room_code})</span>
+            </button>
+          </motion.div>
+        )}
 
         {/* Live Subtitle HUD */}
         <AnimatePresence>
@@ -444,7 +500,11 @@ export function DialogueCanvas({
             <Button
               variant={isMicMuted ? 'danger' : listening ? 'primary' : 'secondary'}
               size="sm"
-              onClick={() => setIsMicMuted((v) => !v)}
+              onClick={() => {
+                const next = !isMicMuted;
+                setIsMicMuted(next);
+                roomService.updateLanguages(room.room_code, { is_muted: next }).catch(() => {});
+              }}
               title={isMicMuted ? 'Unmute microphone' : 'Mute microphone'}
             >
               {isMicMuted ? <MicOff size={16} /> : <Mic size={16} />}

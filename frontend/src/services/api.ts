@@ -137,6 +137,18 @@ export const roomService = {
     return apiCall<Participant[]>(`/api/v1/rooms/${code}/participants`, 'GET', null, true);
   },
 
+  async updateLanguages(
+    code: string,
+    data: { speaking_lang?: string; listening_lang?: string; is_muted?: boolean }
+  ): Promise<{ ok: boolean; participants?: Participant[] }> {
+    return apiCall<{ ok: boolean; participants?: Participant[] }>(
+      `/api/v1/rooms/${code}/languages`,
+      'POST',
+      data,
+      true
+    );
+  },
+
   async leaveRoom(code: string): Promise<{ ok: boolean }> {
     return apiCall<{ ok: boolean }>(`/api/v1/rooms/${code}/leave`, 'POST', {}, true);
   },

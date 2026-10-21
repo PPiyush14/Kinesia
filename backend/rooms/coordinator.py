@@ -27,6 +27,7 @@ from backend.db.rooms import (
     get_session_insights,
     remove_participant,
     save_session_insights,
+    update_participant_languages,
 )
 from backend.gemma_client import GemmaClient
 from backend.nlp.entity_extractor import EntityExtractor
@@ -140,6 +141,7 @@ class RoomCoordinator:
                 "avatar_color": p.avatar_color,
                 "speaking_lang": p.speaking_lang,
                 "listening_lang": p.listening_lang,
+                "is_muted": p.is_muted,
             }
             for p in room.participants.values()
         ]
@@ -157,12 +159,57 @@ class RoomCoordinator:
                 "avatar_color": avatar_color,
                 "speaking_lang": speaking_lang,
                 "listening_lang": listening_lang,
+                "is_muted": False,
                 "participant_count": len(room.participants),
             },
             exclude_user_id=user_id,
         )
 
         return room, participant.event_queue
+
+    def update_participant_status(
+        self,
+        room_code: str,
+        user_id: str,
+        speaking_lang: str | None = None,
+        listening_lang: str | None = None,
+        is_muted: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Update participant dialect or mute state and notify room."""
+        clean_code = room_code.strip().lower()
+        with self._lock:
+            room = self.active_rooms.get(clean_code)
+            if not room or user_id not in room.participants:
+                return []
+            p = room.participants[user_id]
+            if speaking_lang:
+                p.speaking_lang = speaking_lang
+            if listening_lang:
+                p.listening_lang = listening_lang
+            if is_muted is not None:
+                p.is_muted = is_muted
+
+            update_participant_languages(
+                room.room_id,
+                user_id,
+                speaking_lang=speaking_lang,
+                listening_lang=listening_lang,
+            )
+
+            participants_list = [
+                {
+                    "user_id": part.user_id,
+                    "user_name": part.user_name,
+                    "avatar_color": part.avatar_color,
+                    "speaking_lang": part.speaking_lang,
+                    "listening_lang": part.listening_lang,
+                    "is_muted": part.is_muted,
+                }
+                for part in room.participants.values()
+            ]
+
+        self.broadcast_event(clean_code, "participants", participants_list)
+        return participants_list
 
     def leave_room(self, room_code: str, user_id: str) -> None:
         """Handle participant leaving the room."""
@@ -183,6 +230,7 @@ class RoomCoordinator:
                     "avatar_color": p.avatar_color,
                     "speaking_lang": p.speaking_lang,
                     "listening_lang": p.listening_lang,
+                    "is_muted": p.is_muted,
                 }
                 for p in room.participants.values()
             ]
@@ -260,6 +308,18 @@ class RoomCoordinator:
         )
 
         with self._lock:
+            # Auto-register speaker if not yet in memory due to connection race
+            if speaker_id not in room.participants:
+                from backend.db.auth import get_user_profile
+                u_prof = get_user_profile(speaker_id)
+                room.participants[speaker_id] = ParticipantSession(
+                    user_id=speaker_id,
+                    user_name=speaker_name,
+                    avatar_color=(u_prof or {}).get("avatar_color", "#10B981"),
+                    speaking_lang=source_lang,
+                    listening_lang=source_lang,
+                )
+
             # Determine distinct target languages needed by room participants
             target_langs = {
                 p.listening_lang
