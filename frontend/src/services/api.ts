@@ -1,4 +1,4 @@
-import type { AuthResponse, Room, SessionInsights, TranscriptTurn, User } from '@/types';
+import type { AuthResponse, Participant, Room, SessionInsights, TranscriptTurn, User } from '@/types';
 
 const TOKEN_KEY = 'kinesia_auth_token';
 
@@ -131,6 +131,14 @@ export const roomService = {
 
   async getInsights(code: string): Promise<SessionInsights> {
     return apiCall<SessionInsights>(`/api/v1/rooms/${code}/insights`, 'GET', null, false);
+  },
+
+  async getParticipants(code: string): Promise<Participant[]> {
+    return apiCall<Participant[]>(`/api/v1/rooms/${code}/participants`, 'GET', null, true);
+  },
+
+  async leaveRoom(code: string): Promise<{ ok: boolean }> {
+    return apiCall<{ ok: boolean }>(`/api/v1/rooms/${code}/leave`, 'POST', {}, true);
   },
 
   async deleteRoom(code: string): Promise<{ ok: boolean }> {

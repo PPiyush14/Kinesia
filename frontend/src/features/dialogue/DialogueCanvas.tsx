@@ -14,6 +14,7 @@ import {
   ArrowLeft,
   Trash2,
   AlertTriangle,
+  LogOut,
 } from 'lucide-react';
 import type { Participant, Room, TranscriptTurn, User, SessionInsights } from '@/types';
 import { SUPPORTED_LANGUAGES, langShort } from '@/types';
@@ -49,6 +50,7 @@ export function DialogueCanvas({
   onToast,
   onCopyInvite,
 }: DialogueCanvasProps) {
+  const isHost = Boolean(room.host_id && String(room.host_id) === String(currentUser.id));
   const [participants, setParticipants] = useState<Participant[]>([
     {
       user_id: currentUser.id,
@@ -58,7 +60,7 @@ export function DialogueCanvas({
       listening_lang: listeningLang,
     },
   ]);
-  const [speakingUserId, setSpeakingUserId] = useState<number | null>(null);
+  const [speakingUserId, setSpeakingUserId] = useState<string | number | null>(null);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [inputText, setInputText] = useState('');
@@ -66,8 +68,10 @@ export function DialogueCanvas({
   const [transcripts, setTranscripts] = useState<TranscriptTurn[]>([]);
   const [activeSubtitle, setActiveSubtitle] = useState<TranscriptTurn | null>(null);
   const [ending, setEnding] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [showLeaveModal, setShowLeaveModal] = useState(false);
+  const [showEndModal, setShowEndModal] = useState(false);
   const [showClearModal, setShowClearModal] = useState(false);
   const [connected, setConnected] = useState(false);
 
@@ -76,7 +80,7 @@ export function DialogueCanvas({
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Load existing transcripts on mount
+  // Load existing transcripts & participants on mount
   useEffect(() => {
     roomService
       .getTranscripts(room.room_code)
@@ -85,6 +89,17 @@ export function DialogueCanvas({
       })
       .catch((err) => {
         console.error('Could not fetch transcripts', err);
+      });
+
+    roomService
+      .getParticipants(room.room_code)
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setParticipants(data);
+        }
+      })
+      .catch((err) => {
+        console.warn('Could not fetch initial participants', err);
       });
   }, [room.room_code]);
 
@@ -151,14 +166,28 @@ export function DialogueCanvas({
       onOpen: () => setConnected(true),
       onError: () => setConnected(false),
       onTurn: handleTranscriptTurn,
-      onParticipants: (list: Participant[]) => setParticipants(list),
-      onSpeaking: (uid: number) => {
+      onParticipants: (list: Participant[]) => {
+        if (Array.isArray(list) && list.length > 0) {
+          setParticipants(list);
+        }
+      },
+      onParticipantJoined: (p: Participant) => {
+        setParticipants((prev) => {
+          const exists = prev.some((x) => String(x.user_id) === String(p.user_id));
+          return exists ? prev.map((x) => (String(x.user_id) === String(p.user_id) ? p : x)) : [...prev, p];
+        });
+        onToast(`${p.user_name} joined the conversation`, 'info');
+      },
+      onParticipantLeft: (uid: string | number) => {
+        setParticipants((prev) => prev.filter((x) => String(x.user_id) !== String(uid)));
+      },
+      onSpeaking: (uid: number | string) => {
         setSpeakingUserId(uid);
         if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
         speakingTimerRef.current = setTimeout(() => setSpeakingUserId(null), 2500);
       },
       onSessionConcluded: (res) => {
-        onToast('Session concluded', 'info');
+        onToast('Conversation concluded by host', 'info');
         onConcludeSession(res as SessionInsights);
       },
       onTranscriptsCleared: () => {
@@ -220,13 +249,28 @@ export function DialogueCanvas({
     }
   };
 
+  const handleLeave = async () => {
+    setLeaving(true);
+    try {
+      await roomService.leaveRoom(room.room_code);
+    } catch {
+      /* ignore if already disconnected */
+    } finally {
+      setLeaving(false);
+      setShowLeaveModal(false);
+      onLeaveRoom();
+    }
+  };
+
   const handleConclude = async () => {
     setEnding(true);
     try {
       const res = await roomService.endSession(room.room_code);
+      setShowEndModal(false);
       onConcludeSession(res);
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Could not conclude session', 'error');
+    } finally {
       setEnding(false);
     }
   };
@@ -418,15 +462,35 @@ export function DialogueCanvas({
               {isAudioMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
             </Button>
 
-            <Button
-              variant="danger"
-              size="sm"
-              loading={ending}
-              onClick={handleConclude}
-              leftIcon={<PhoneOff size={15} />}
-            >
-              End
-            </Button>
+            {isHost ? (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setShowLeaveModal(true)}
+                  leftIcon={<ArrowLeft size={15} />}
+                >
+                  Leave
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => setShowEndModal(true)}
+                  leftIcon={<PhoneOff size={15} />}
+                >
+                  End for All
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => setShowLeaveModal(true)}
+                leftIcon={<PhoneOff size={15} />}
+              >
+                Leave Room
+              </Button>
+            )}
           </div>
         </div>
       </footer>
@@ -527,18 +591,56 @@ export function DialogueCanvas({
                 Leaving will disconnect your microphone and audio stream. The room remains active for other participants.
               </p>
               <div className="flex items-center justify-end gap-2 pt-2">
-                <Button variant="secondary" size="sm" onClick={() => setShowLeaveModal(false)}>
+                <Button variant="secondary" size="sm" onClick={() => setShowLeaveModal(false)} disabled={leaving}>
                   Stay in room
                 </Button>
                 <Button
-                  variant="primary"
+                  variant="danger"
                   size="sm"
-                  onClick={() => {
-                    setShowLeaveModal(false);
-                    onLeaveRoom();
-                  }}
+                  loading={leaving}
+                  onClick={handleLeave}
                 >
                   Leave room
+                </Button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* End Room Confirmation Modal (Host Only) */}
+      <AnimatePresence>
+        {showEndModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="w-full max-w-sm rounded-2xl border border-border bg-surface-1 p-6 space-y-4 shadow-elevation-3"
+            >
+              <div className="flex items-center gap-3 text-ink-primary">
+                <div className="h-10 w-10 rounded-xl bg-danger/10 flex items-center justify-center text-danger">
+                  <PhoneOff size={18} />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-sm">End Session for Everyone?</h3>
+                  <p className="text-2xs text-ink-muted">Room {room.room_code}</p>
+                </div>
+              </div>
+              <p className="text-xs text-ink-secondary leading-relaxed">
+                As host, ending the session will disconnect all participants and immediately generate an AI summary and action items.
+              </p>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <Button variant="secondary" size="sm" onClick={() => setShowEndModal(false)} disabled={ending}>
+                  Keep Room Active
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  loading={ending}
+                  onClick={handleConclude}
+                >
+                  End Session
                 </Button>
               </div>
             </motion.div>

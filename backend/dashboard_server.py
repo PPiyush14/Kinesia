@@ -1063,29 +1063,34 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
 
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
         self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+        self.close_connection = False
+
+        participants_list = [
+            {
+                "user_id": p.user_id,
+                "user_name": p.user_name,
+                "avatar_color": p.avatar_color,
+                "speaking_lang": p.speaking_lang,
+                "listening_lang": p.listening_lang,
+            }
+            for p in room.participants.values()
+        ]
 
         init_event = {
             "type": "connected",
             "room_code": room_code,
             "title": room.title,
             "user_id": user_profile["id"],
-            "participants": [
-                {
-                    "user_id": p.user_id,
-                    "user_name": p.user_name,
-                    "avatar_color": p.avatar_color,
-                    "speaking_lang": p.speaking_lang,
-                    "listening_lang": p.listening_lang,
-                }
-                for p in room.participants.values()
-            ],
+            "participants": participants_list,
         }
         self._write_sse_event("connected", init_event)
+        self._write_sse_event("participants", participants_list)
 
         try:
             while True:
@@ -1219,7 +1224,21 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not room:
                     self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
                     return
-                self._send_v1_json(list_active_participants(room["id"]))
+                coord_room = self.state.coordinator.active_rooms.get(room_code.lower())
+                if coord_room and coord_room.participants:
+                    participants = [
+                        {
+                            "user_id": p.user_id,
+                            "user_name": p.user_name,
+                            "avatar_color": p.avatar_color,
+                            "speaking_lang": p.speaking_lang,
+                            "listening_lang": p.listening_lang,
+                        }
+                        for p in coord_room.participants.values()
+                    ]
+                else:
+                    participants = list_active_participants(room["id"])
+                self._send_v1_json(participants)
                 return
 
             if len(parts) >= 2 and parts[1] == "transcripts":
@@ -1350,12 +1369,27 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     source_lang=payload.get("source_lang", "en"),
                     confidence=float(payload.get("confidence", 1.0)),
                 )
+            elif path.startswith("/api/v1/rooms/") and path.endswith("/leave"):
+                user = self._get_auth_user()
+                if not user:
+                    self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                    return
+                room_code = path.split("/")[4]
+                self.state.coordinator.leave_room(room_code, user["id"])
+                response = {"ok": True, "left": True}
             elif path.startswith("/api/v1/rooms/") and path.endswith("/end"):
                 user = self._get_auth_user()
                 if not user:
                     self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
                     return
                 room_code = path.split("/")[4]
+                room = get_room_by_code(room_code)
+                if not room:
+                    self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
+                    return
+                if str(room.get("host_id") or "") != str(user.get("id") or ""):
+                    self._send_v1_error("Forbidden: Only the conversation host can conclude this session.", status=HTTPStatus.FORBIDDEN)
+                    return
                 response = self.state.coordinator.conclude_session(room_code)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")

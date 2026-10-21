@@ -132,7 +132,22 @@ class RoomCoordinator:
                 listening_lang=listening_lang,
             )
 
-        # Notify other participants
+        # Broadcast full updated participant list to all room members
+        participants_list = [
+            {
+                "user_id": p.user_id,
+                "user_name": p.user_name,
+                "avatar_color": p.avatar_color,
+                "speaking_lang": p.speaking_lang,
+                "listening_lang": p.listening_lang,
+            }
+            for p in room.participants.values()
+        ]
+        self.broadcast_event(
+            room_code,
+            "participants",
+            participants_list,
+        )
         self.broadcast_event(
             room_code,
             "participant_joined",
@@ -161,7 +176,22 @@ class RoomCoordinator:
             remove_participant(room.room_id, user_id)
 
             remaining_count = len(room.participants)
+            remaining_list = [
+                {
+                    "user_id": p.user_id,
+                    "user_name": p.user_name,
+                    "avatar_color": p.avatar_color,
+                    "speaking_lang": p.speaking_lang,
+                    "listening_lang": p.listening_lang,
+                }
+                for p in room.participants.values()
+            ]
 
+        self.broadcast_event(
+            clean_code,
+            "participants",
+            remaining_list,
+        )
         self.broadcast_event(
             clean_code,
             "participant_left",

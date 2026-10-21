@@ -1,5 +1,5 @@
 export interface User {
-  id: number;
+  id: number | string;
   username: string;
   display_name: string;
   email?: string;
@@ -31,7 +31,7 @@ export interface Room {
 }
 
 export interface Participant {
-  user_id: number;
+  user_id: number | string;
   user_name: string;
   avatar_color?: string;
   speaking_lang?: string;
@@ -40,7 +40,7 @@ export interface Participant {
 
 export interface TranscriptTurn {
   id?: string | number;
-  speaker_id?: number;
+  speaker_id?: number | string;
   speaker_name: string;
   source_lang: string;
   listening_lang?: string;

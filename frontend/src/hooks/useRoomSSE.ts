@@ -2,9 +2,11 @@ import { useEffect, useRef, useCallback } from 'react';
 import type { Participant, TranscriptTurn } from '@/types';
 
 export interface RoomSSEHandlers {
-  onSpeaking?: (userId: number, name?: string) => void;
+  onSpeaking?: (userId: number | string, name?: string) => void;
   onTurn?: (turn: TranscriptTurn) => void;
   onParticipants?: (participants: Participant[]) => void;
+  onParticipantJoined?: (participant: Participant) => void;
+  onParticipantLeft?: (userId: string | number) => void;
   onSessionConcluded?: (payload?: unknown) => void;
   onTranscriptsCleared?: () => void;
   onError?: (err: Event) => void;
@@ -65,6 +67,39 @@ export function useRoomSSE(
       try {
         const data = JSON.parse((e as MessageEvent).data) as TranscriptTurn;
         handlersRef.current.onTurn?.(data);
+      } catch {
+        /* ignore */
+      }
+    });
+
+    es.addEventListener('connected', (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data);
+        if (data && Array.isArray(data.participants)) {
+          handlersRef.current.onParticipants?.(data.participants);
+        }
+      } catch {
+        /* ignore */
+      }
+    });
+
+    es.addEventListener('participant_joined', (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data);
+        if (data && data.user_id) {
+          handlersRef.current.onParticipantJoined?.(data);
+        }
+      } catch {
+        /* ignore */
+      }
+    });
+
+    es.addEventListener('participant_left', (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data);
+        if (data && data.user_id) {
+          handlersRef.current.onParticipantLeft?.(data.user_id);
+        }
       } catch {
         /* ignore */
       }
