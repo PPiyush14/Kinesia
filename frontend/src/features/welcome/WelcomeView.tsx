@@ -94,7 +94,7 @@ export function WelcomeView({
     .substring(0, 2).toUpperCase();
   const firstName = (currentUser.display_name || currentUser.username || 'there').split(' ')[0];
 
-  const liveRooms = activeRooms.filter(r => r.status === 'live');
+  const liveRooms = activeRooms.filter(r => Boolean(r.is_active) || r.status === 'live');
   const recentRooms = activeRooms.slice(0, 3);
 
   return (

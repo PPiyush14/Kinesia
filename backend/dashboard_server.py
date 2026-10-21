@@ -1433,6 +1433,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
 
+        if path == "/api/v1/rooms/clear-all":
+            user = self._get_auth_user()
+            if not user:
+                self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                return
+            clear_all_rooms(user["id"])
+            self._send_v1_json({"ok": True, "message": "All rooms cleared"})
+            return
+
         if path.startswith("/api/v1/rooms/"):
             tail = path[len("/api/v1/rooms/"):]
             parts = tail.split("/")
@@ -1458,6 +1467,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     clear_room_transcripts(room["id"])
                 self._send_v1_json({"ok": True, "message": "Transcripts cleared"})
+                return
+
+            if len(parts) == 1:
+                user = self._get_auth_user()
+                if not user:
+                    self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                    return
+                room = get_room_by_code(room_code)
+                if not room:
+                    self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
+                    return
+                delete_room(room_code)
+                self.state.coordinator.active_rooms.pop(room_code.strip().lower(), None)
+                self._send_v1_json({"ok": True, "message": "Room deleted"})
                 return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
