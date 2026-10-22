@@ -56,6 +56,7 @@ class RoomSession:
     title: str
     record_session: bool
     participants: dict[str, ParticipantSession] = field(default_factory=dict)
+    recent_utterances: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
 
@@ -334,7 +335,48 @@ class RoomCoordinator:
         if not clean_text:
             return {}
 
+        # 1. Clean immediate consecutive repeated words ("hello hello" -> "hello", "the the" -> "the")
+        words = clean_text.split()
+        deduped_words: list[str] = []
+        for i, w in enumerate(words):
+            if i == 0 or w.lower() != words[i - 1].lower():
+                deduped_words.append(w)
+        clean_text = " ".join(deduped_words).strip()
+        if not clean_text:
+            return {}
+
         now = time.time()
+
+        # 2. Check speaker's recent utterance cache to eliminate 1+1, stutter echoes, and duplicate prefixes
+        norm_incoming = clean_text.lower().strip()
+        with self._lock:
+            speaker_history = room.recent_utterances.setdefault(speaker_id, [])
+            # Prune entries older than 5.0 seconds
+            room.recent_utterances[speaker_id] = [(txt, t) for (txt, t) in speaker_history if now - t < 5.0]
+            speaker_history = room.recent_utterances[speaker_id]
+
+            for prev_txt, prev_t in speaker_history:
+                prev_norm = prev_txt.lower().strip()
+                # Exact duplicate within 4 seconds
+                if prev_norm == norm_incoming:
+                    logger.debug("Dropping exact duplicate utterance from %s: %s", speaker_id, clean_text)
+                    return {}
+                # Fully contained substring of recently emitted longer sentence
+                if len(norm_incoming) >= 3 and norm_incoming in prev_norm and (now - prev_t) < 3.0:
+                    logger.debug("Dropping substring duplicate from %s: %s", speaker_id, clean_text)
+                    return {}
+                # Previous recent utterance was a prefix of incoming (e.g. "hello" -> "hello how are you")
+                if len(prev_norm) >= 3 and norm_incoming.startswith(prev_norm) and (now - prev_t) < 3.0:
+                    delta = clean_text[len(prev_txt):].strip(" ,.-!?।")
+                    if delta and len(delta) >= 2:
+                        logger.info("Stripped duplicate prefix '%s' -> processing new delta '%s'", prev_txt, delta)
+                        clean_text = delta
+                        norm_incoming = clean_text.lower().strip()
+                    else:
+                        logger.debug("Dropping fully redundant prefix expansion from %s", speaker_id)
+                        return {}
+
+            speaker_history.append((clean_text, now))
 
         # Emit speaking event
         self.broadcast_event(
@@ -403,6 +445,14 @@ class RoomCoordinator:
                 spk_p = room.participants.get(speaker_id)
                 if spk_p and getattr(spk_p, "gender", None):
                     speaker_gender = spk_p.gender
+                else:
+                    try:
+                        from backend.db.auth import get_user_profile
+                        u = get_user_profile(speaker_id)
+                        if u and u.get("gender"):
+                            speaker_gender = u["gender"]
+                    except Exception:
+                        pass
 
             try:
                 synth_ch = ChannelConfig(

@@ -147,7 +147,8 @@ class GemmaClient:
             "Even if the speaker spoke English, code-switched, or used Hinglish words, you MUST translate the whole sentence into the target language. "
             "NEVER echo back untranslated English words when target is Hindi or another Indian language.\n"
             "2. CONVERSATIONAL ACCURACY: Maintain informal tone, humor, sentence pacing, and natural flow.\n"
-            "3. CLEAN FORMAT: Return ONLY the direct translation. Do not add quotes, markdown, explanations, speaker tags, or notes."
+            "3. CLEAN FORMAT: Return ONLY the direct translation. Do not add quotes, markdown, explanations, speaker tags, or notes.\n"
+            "4. GRAMMAR & NATURAL DIALOGUE: If the user transcript contains speech stutter, repeated words (e.g. 'hello hello', 'I I think'), or fragmented artifacts, output a single clean, natural, grammatically correct sentence without any repetitions."
         )
         if listener_channel.translation_hint.strip():
             prompt += f" Additional instruction: {listener_channel.translation_hint.strip()}"

@@ -350,15 +350,32 @@ def save_session_insights(
     ent_json = json.dumps(entities, ensure_ascii=False)
 
     with get_db() as db:
-        db.execute(
-            """
-            INSERT OR REPLACE INTO session_insights (
-                room_id, executive_summary, action_items_json,
-                key_points_json, entities_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (room_id, clean_summary, ai_json, kp_json, ent_json, now),
-        )
+        if db.is_pg:
+            db.execute(
+                """
+                INSERT INTO session_insights (
+                    room_id, executive_summary, action_items_json,
+                    key_points_json, entities_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (room_id) DO UPDATE SET
+                    executive_summary = EXCLUDED.executive_summary,
+                    action_items_json = EXCLUDED.action_items_json,
+                    key_points_json = EXCLUDED.key_points_json,
+                    entities_json = EXCLUDED.entities_json,
+                    created_at = EXCLUDED.created_at
+                """,
+                (room_id, clean_summary, ai_json, kp_json, ent_json, now),
+            )
+        else:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO session_insights (
+                    room_id, executive_summary, action_items_json,
+                    key_points_json, entities_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (room_id, clean_summary, ai_json, kp_json, ent_json, now),
+            )
 
     return {
         "room_id": room_id,

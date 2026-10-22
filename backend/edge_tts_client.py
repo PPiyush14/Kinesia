@@ -77,14 +77,15 @@ class EdgeTtsClient:
         text: str,
         channel: ChannelConfig,
         language: str,
+        gender: str | None = None,
     ) -> bytes:
         clean = text.strip()
         if not clean:
             return b""
 
-        # Check gender preference from environment or channel (defaults to female)
-        gender = os.getenv("TTS_VOICE_GENDER", "female").lower().strip()
-        voice_map = INDIAN_VOICES_MALE if gender == "male" else INDIAN_VOICES_FEMALE
+        # Use passed gender directly, with env fallback
+        effective_gender = (gender or os.getenv("TTS_VOICE_GENDER", "female")).lower().strip()
+        voice_map = INDIAN_VOICES_MALE if effective_gender == "male" else INDIAN_VOICES_FEMALE
 
         # If a specific custom voice is explicitly requested in env or channel
         custom_voice = os.getenv("DEFAULT_TTS_VOICE", "").strip()

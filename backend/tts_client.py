@@ -37,6 +37,8 @@ class TtsClient:
         language: str,
         gender: str = "female",
     ) -> bytes:
+        if self.provider_name == "edge":
+            return self._edge.synthesize_for_language(text, channel, language, gender=gender)
         try:
             audio = self._client.synthesize_for_language(text, channel, language)
             if audio:

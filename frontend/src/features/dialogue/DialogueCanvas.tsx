@@ -126,32 +126,93 @@ export function DialogueCanvas({
       });
   }, [room.room_code, currentUser, speakingLang, listeningLang, isMicMuted]);
 
-  // Audio queue for incoming TTS
-  const playAudio = useCallback(
+  // Audio queue for incoming TTS to prevent interruptions, stuttering, and browser autoplay blocks
+  const audioQueueRef = useRef<string[]>([]);
+  const isPlayingRef = useRef<boolean>(false);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+
+  const processAudioQueue = useCallback(() => {
+    if (isAudioMuted || isPlayingRef.current || audioQueueRef.current.length === 0) {
+      return;
+    }
+    const nextUrl = audioQueueRef.current[0];
+    if (!nextUrl) {
+      audioQueueRef.current.shift();
+      return;
+    }
+
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+    }
+    const audio = audioRef.current;
+    const savedOutput = typeof localStorage !== 'undefined' ? localStorage.getItem('kinesia_audio_output') : null;
+    if (savedOutput && savedOutput !== 'default' && typeof (audio as any).setSinkId === 'function') {
+      (audio as any).setSinkId(savedOutput).catch(() => {});
+    }
+
+    isPlayingRef.current = true;
+    setIsPlayingAudio(true);
+
+    audio.src = nextUrl;
+    audio.onended = () => {
+      audioQueueRef.current.shift();
+      isPlayingRef.current = false;
+      setIsPlayingAudio(false);
+      processAudioQueue();
+    };
+    audio.onerror = () => {
+      audioQueueRef.current.shift();
+      isPlayingRef.current = false;
+      setIsPlayingAudio(false);
+      processAudioQueue();
+    };
+
+    audio.play()
+      .then(() => {
+        setAutoplayBlocked(false);
+      })
+      .catch((err) => {
+        console.warn('Autoplay blocked by browser policy:', err);
+        isPlayingRef.current = false;
+        setIsPlayingAudio(false);
+        setAutoplayBlocked(true);
+      });
+  }, [isAudioMuted]);
+
+  const queueAudio = useCallback(
     (audioDataUrl: string) => {
       if (isAudioMuted || !audioDataUrl) return;
-      try {
-        if (!audioRef.current) {
-          audioRef.current = new Audio();
-        }
-        const savedOutput = typeof localStorage !== 'undefined' ? localStorage.getItem('kinesia_audio_output') : null;
-        if (savedOutput && savedOutput !== 'default' && typeof (audioRef.current as any).setSinkId === 'function') {
-          (audioRef.current as any).setSinkId(savedOutput).catch(() => {});
-        }
-        audioRef.current.src = audioDataUrl;
-        audioRef.current.onplay = () => setIsPlayingAudio(true);
-        audioRef.current.onended = () => setIsPlayingAudio(false);
-        audioRef.current.onerror = () => setIsPlayingAudio(false);
-        audioRef.current.play().catch(() => {
-          setIsPlayingAudio(false);
-        });
-      } catch (err) {
-        console.error('Playback error:', err);
-        setIsPlayingAudio(false);
-      }
+      audioQueueRef.current.push(audioDataUrl);
+      processAudioQueue();
     },
-    [isAudioMuted]
+    [isAudioMuted, processAudioQueue]
   );
+
+  const unlockAndResumeAudio = useCallback(() => {
+    setAutoplayBlocked(false);
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+    }
+    audioRef.current.play().then(() => {
+      processAudioQueue();
+    }).catch(() => {
+      processAudioQueue();
+    });
+  }, [processAudioQueue]);
+
+  useEffect(() => {
+    const handleFirstGesture = () => {
+      unlockAndResumeAudio();
+      window.removeEventListener('click', handleFirstGesture);
+      window.removeEventListener('keydown', handleFirstGesture);
+    };
+    window.addEventListener('click', handleFirstGesture);
+    window.addEventListener('keydown', handleFirstGesture);
+    return () => {
+      window.removeEventListener('click', handleFirstGesture);
+      window.removeEventListener('keydown', handleFirstGesture);
+    };
+  }, [unlockAndResumeAudio]);
 
   const handleTranscriptTurn = useCallback(
     (turn: TranscriptTurn) => {
@@ -169,7 +230,7 @@ export function DialogueCanvas({
 
       const isMe = String(turn.speaker_id) === String(currentUser.id);
       if (turn.audio_data_url && !isMe) {
-        playAudio(turn.audio_data_url);
+        queueAudio(turn.audio_data_url);
       } else if (
         !isAudioMuted &&
         turn.localized_text &&
@@ -189,7 +250,7 @@ export function DialogueCanvas({
         }
       }
     },
-    [currentUser.id, isAudioMuted, listeningLang, playAudio]
+    [currentUser.id, isAudioMuted, listeningLang, queueAudio]
   );
 
   useRoomSSE(
@@ -413,6 +474,19 @@ export function DialogueCanvas({
           </div>
         </div>
       </header>
+
+      {/* Autoplay blocked notification banner */}
+      {autoplayBlocked && (
+        <div
+          onClick={unlockAndResumeAudio}
+          role="button"
+          tabIndex={0}
+          className="shrink-0 bg-accent/20 border-b border-accent/40 px-4 py-2 flex items-center justify-center gap-2 text-xs text-accent-light font-medium cursor-pointer hover:bg-accent/30 transition-all select-none animate-pulse"
+        >
+          <span>🔊</span>
+          <span>Click anywhere to enable live audio playback (required by browser audio policy)</span>
+        </div>
+      )}
 
       {/* Stage */}
       <main className="flex-1 relative overflow-hidden flex flex-col items-center justify-center p-4 sm:p-8">

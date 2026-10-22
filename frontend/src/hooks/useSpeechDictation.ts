@@ -20,7 +20,7 @@ export function useSpeechDictation({
   enabled,
   onResult,
   onInterim,
-  silenceThresholdMs = 750,
+  silenceThresholdMs = 1250,
   duckDuringPlayback = false,
 }: UseSpeechDictationOptions) {
   const [listening, setListening] = useState(false);
@@ -50,26 +50,49 @@ export function useSpeechDictation({
       silenceTimerRef.current = null;
     }
 
-    const raw = accumulatedBufferRef.current.trim();
+    let raw = accumulatedBufferRef.current.trim();
     accumulatedBufferRef.current = '';
 
     if (!raw) return;
 
-    // Prune sentences older than 5 seconds from deduplication cache
-    const now = Date.now();
-    recentSentRef.current = recentSentRef.current.filter((item) => now - item.time < 5000);
+    // Remove immediately repeated duplicate words ("hello hello" -> "hello")
+    const words = raw.split(/\s+/);
+    const dedupedWords: string[] = [];
+    for (let i = 0; i < words.length; i++) {
+      if (i === 0 || words[i].toLowerCase() !== words[i - 1].toLowerCase()) {
+        dedupedWords.push(words[i]);
+      }
+    }
+    raw = dedupedWords.join(' ').trim();
+    if (!raw) return;
 
-    // Normalize for deduplication check
+    // Prune sentences older than 6 seconds from deduplication cache
+    const now = Date.now();
+    recentSentRef.current = recentSentRef.current.filter((item) => now - item.time < 6000);
+
+    // Normalize for deduplication comparison
     const normalized = raw.toLowerCase().replace(/[.,!?;:।]/g, '').trim();
 
-    // Prevent re-emitting identical or overlapping substrings emitted within the last 5 seconds
-    const isDuplicate = recentSentRef.current.some((item) => {
+    // Check against recent utterances to prevent stutter and repeating prefixes
+    for (const item of recentSentRef.current) {
       const itemNorm = item.text.toLowerCase().replace(/[.,!?;:।]/g, '').trim();
-      return itemNorm === normalized || (itemNorm.endsWith(normalized) && normalized.length > 3);
-    });
-
-    if (isDuplicate) {
-      return;
+      // 1. Exact duplicate
+      if (itemNorm === normalized) {
+        return;
+      }
+      // 2. Already included inside an earlier sentence
+      if (itemNorm.includes(normalized) && normalized.length > 2) {
+        return;
+      }
+      // 3. New utterance extends an earlier sentence ("hello" -> "hello how are you")
+      if (normalized.startsWith(itemNorm) && itemNorm.length >= 3) {
+        const delta = raw.slice(item.text.length).replace(/^[.,!?;:।\s]+/, '').trim();
+        if (!delta || delta.length < 2) {
+          return;
+        }
+        raw = delta;
+        break;
+      }
     }
 
     recentSentRef.current.push({ text: raw, time: now });
@@ -167,7 +190,7 @@ export function useSpeechDictation({
       // If the buffer ends with sentence-ending punctuation and has substance, flush faster
       const hasTerminalPunctuation = /[.!?।]\s*$/.test(accumulatedBufferRef.current);
       const wordCount = accumulatedBufferRef.current.split(/\s+/).filter(Boolean).length;
-      const waitTime = hasTerminalPunctuation && wordCount >= 3 ? 350 : silenceThresholdMs;
+      const waitTime = hasTerminalPunctuation && wordCount >= 3 ? 750 : silenceThresholdMs;
 
       silenceTimerRef.current = setTimeout(() => {
         flushBuffer();
