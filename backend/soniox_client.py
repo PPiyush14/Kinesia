@@ -375,7 +375,7 @@ class SonioxClient:
     def transcribe_pcm16(
         self,
         audio_bytes: bytes,
-        channel: ChannelConfig,
+        channel: ChannelConfig | None = None,
         session_language_hint: str | None = None,
         *,
         sample_rate: int | None = None,
@@ -400,7 +400,7 @@ class SonioxClient:
     def _transcribe_pcm16_once(
         self,
         audio_bytes: bytes,
-        channel: ChannelConfig,
+        channel: ChannelConfig | None = None,
         session_language_hint: str | None = None,
         *,
         sample_rate: int | None = None,
@@ -435,6 +435,7 @@ class SonioxClient:
                     active_sample_rate,
                     active_channels,
                 ),
+                kwargs={"realtime_pacing": False},
                 daemon=True,
             )
             keepalive = threading.Thread(
@@ -466,6 +467,16 @@ class SonioxClient:
                         detected_language, confidence = self._detect_language_and_confidence(final_tokens)
                         return SonioxTranscriptionResult(
                             transcript=maybe_transcript,
+                            detected_language=detected_language,
+                            confidence=confidence,
+                        )
+
+                    # Prompt return on stream completion tokens
+                    if any(t.get("text") in {"<end>", "<fin>"} for t in tokens):
+                        transcript = self._render_tokens(final_tokens)
+                        detected_language, confidence = self._detect_language_and_confidence(final_tokens)
+                        return SonioxTranscriptionResult(
+                            transcript=transcript,
                             detected_language=detected_language,
                             confidence=confidence,
                         )
@@ -502,8 +513,8 @@ class SonioxClient:
 
     def _build_request_config(
         self,
-        channel: ChannelConfig,
-        session_language_hint: str | None,
+        channel: ChannelConfig | None = None,
+        session_language_hint: str | None = None,
         *,
         sample_rate: int | None = None,
         channels: int | None = None,
@@ -520,7 +531,7 @@ class SonioxClient:
         }
         if session_language_hint:
             request_config["language_hints"] = [session_language_hint]
-        elif channel.soniox_language_hints:
+        elif channel and channel.soniox_language_hints:
             request_config["language_hints"] = channel.soniox_language_hints
         return request_config
 
@@ -532,14 +543,17 @@ class SonioxClient:
         send_lock: threading.Lock,
         sample_rate: int,
         channels: int,
+        *,
+        realtime_pacing: bool = False,
     ) -> None:
         chunk_size = max(1, int(sample_rate * channels * 2 * (self.chunk_ms / 1000.0)))
-        delay_seconds = chunk_size / float(sample_rate * channels * 2)
+        delay_seconds = chunk_size / float(sample_rate * channels * 2) if realtime_pacing else 0.0
         try:
             for index in range(0, len(audio_bytes), chunk_size):
                 with send_lock:
                     websocket.send(audio_bytes[index : index + chunk_size])
-                time.sleep(delay_seconds)
+                if delay_seconds > 0:
+                    time.sleep(delay_seconds)
             with send_lock:
                 websocket.send(json.dumps({"type": "finalize", "trailing_silence_ms": 300}))
         except BaseException as exc:  # pragma: no cover - defensive thread capture

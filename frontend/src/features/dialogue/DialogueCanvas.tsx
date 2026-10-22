@@ -21,7 +21,8 @@ import type { Participant, Room, TranscriptTurn, User, SessionInsights } from '@
 import { SUPPORTED_LANGUAGES, langShort } from '@/types';
 import { roomService } from '@/services/api';
 import { useRoomSSE } from '@/hooks/useRoomSSE';
-import { useSpeechDictation, mapLang } from '@/hooks/useSpeechDictation';
+import { mapLang } from '@/hooks/useSpeechDictation';
+import { useSonioxAudioCapture } from '@/hooks/useSonioxAudioCapture';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { cn, initials } from '@/lib/utils';
@@ -313,38 +314,34 @@ export function DialogueCanvas({
     { speakingLang, listeningLang }
   );
 
-  // Speech dictation
-  const handleDictatedText = useCallback(
-    async (text: string) => {
-      if (!text.trim() || isMicMuted) return;
+  // Soniox Audio Speech Capture & Streaming
+  const handleAudioUtterance = useCallback(
+    async (base64Wav: string, mimeType: string) => {
+      if (isMicMuted) return;
       try {
-        await roomService.speak(room.room_code, {
-          text: text.trim(),
+        await roomService.speakAudio(room.room_code, {
+          audio_base64: base64Wav,
           source_lang: speakingLang,
+          mime_type: mimeType,
         });
       } catch (err) {
-        onToast(err instanceof Error ? err.message : 'Failed to send speech', 'error');
+        onToast(err instanceof Error ? err.message : 'Failed to send speech audio', 'error');
       }
     },
     [isMicMuted, room.room_code, speakingLang, onToast]
   );
 
-  const { listening, supported } = useSpeechDictation({
-    lang: speakingLang,
+  const { isSpeaking: isLocalSpeaking, supported: audioSupported } = useSonioxAudioCapture({
     enabled: !isMicMuted,
     duckDuringPlayback: isPlayingAudio,
-    onResult: (text: string) => {
-      setLiveInterim('');
-      void handleDictatedText(text);
-    },
-    onInterim: setLiveInterim,
+    onAudioUtterance: handleAudioUtterance,
   });
 
   useEffect(() => {
-    if (!supported) {
-      onToast('Speech recognition not supported in this browser; text chat available', 'info');
+    if (!audioSupported) {
+      onToast('Microphone audio capture not supported in this browser; text chat available', 'info');
     }
-  }, [supported, onToast]);
+  }, [audioSupported, onToast]);
 
   // Scroll transcripts to bottom
   useEffect(() => {
@@ -499,8 +496,10 @@ export function DialogueCanvas({
           )}
         >
           {participants.map((p) => {
-            const isSpeaking = speakingUserId != null && String(speakingUserId) === String(p.user_id);
             const isMe = String(p.user_id) === String(currentUser.id);
+            const isSpeaking =
+              (speakingUserId != null && String(speakingUserId) === String(p.user_id)) ||
+              (isMe && isLocalSpeaking);
             const isMuted = isMe ? isMicMuted : Boolean(p.is_muted);
 
             return (
@@ -628,7 +627,7 @@ export function DialogueCanvas({
 
           <div className="flex items-center gap-2">
             <Button
-              variant={isMicMuted ? 'danger' : listening ? 'primary' : 'secondary'}
+              variant={isMicMuted ? 'danger' : isLocalSpeaking ? 'primary' : 'secondary'}
               size="sm"
               onClick={() => {
                 const next = !isMicMuted;
@@ -639,7 +638,7 @@ export function DialogueCanvas({
             >
               {isMicMuted ? <MicOff size={16} /> : <Mic size={16} />}
               <span className="hidden sm:inline text-xs ml-1.5">
-                {isMicMuted ? 'Muted' : 'Mic On'}
+                {isMicMuted ? 'Muted' : isLocalSpeaking ? 'Speaking...' : 'Listening'}
               </span>
             </Button>
 

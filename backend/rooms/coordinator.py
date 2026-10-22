@@ -77,10 +77,15 @@ class RoomCoordinator:
             logger.warning("EntityExtractor could not be loaded: %s", exc)
             self.entity_extractor = None
 
-        # Speech Synthesis & Transcription
+        # Speech Synthesis & Transcription (Soniox as primary STT)
         self.tts = TtsClient(config)
-        from backend.groq_whisper_client import GroqWhisperClient
-        self.stt = GroqWhisperClient(config)
+        from backend.soniox_client import SonioxClient
+        self.soniox = SonioxClient(config)
+        try:
+            from backend.groq_whisper_client import GroqWhisperClient
+            self.whisper_fallback = GroqWhisperClient(config)
+        except Exception:
+            self.whisper_fallback = None
 
     def get_or_load_room(self, room_code: str) -> RoomSession | None:
         """Fetch active room in memory or load from database."""
@@ -283,6 +288,43 @@ class RoomCoordinator:
                 except queue.Full:
                     logger.debug("Queue full for participant %s in room %s", uid, clean_code)
 
+    @staticmethod
+    def _extract_pcm16le(audio_bytes: bytes, mime_type: str = "") -> tuple[bytes, int, int]:
+        """Extract or convert audio bytes to 16-bit PCM, sample rate, and channels."""
+        # 1. Parse standard RIFF/WAVE header
+        if audio_bytes.startswith(b"RIFF") and b"WAVE" in audio_bytes[:12]:
+            try:
+                import io
+                import wave
+                import numpy as np
+
+                with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+                    sample_rate = wf.getframerate()
+                    channels = wf.getnchannels()
+                    sample_width = wf.getsampwidth()
+                    frames = wf.readframes(wf.getnframes())
+                    if sample_width == 2:
+                        if channels == 1:
+                            return frames, sample_rate, 1
+                        arr = np.frombuffer(frames, dtype=np.int16).reshape(-1, channels)
+                        mono = arr.mean(axis=1).astype(np.int16)
+                        return mono.tobytes(), sample_rate, 1
+            except Exception as exc:
+                logger.debug("Failed parsing WAV via wave module: %s", exc)
+
+        # 2. Try pydub/ffmpeg for webm/ogg/mp3 if available
+        try:
+            import io
+            from pydub import AudioSegment
+            seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+            return seg.raw_data, 16000, 1
+        except Exception:
+            pass
+
+        # 3. Default fallback as 16kHz mono PCM
+        return audio_bytes, 16000, 1
+
     def process_audio_utterance(
         self,
         room_code: str,
@@ -290,24 +332,57 @@ class RoomCoordinator:
         speaker_name: str,
         audio_bytes: bytes,
         source_lang: str,
-        mime_type: str = "audio/webm",
+        mime_type: str = "audio/wav",
     ) -> dict[str, Any]:
-        """Transcribe speech audio via Groq Whisper and fan out translations."""
-        transcribed_text = self.stt.transcribe(
-            audio_bytes,
-            language=source_lang,
-            filename="speech.webm" if "webm" in mime_type else "speech.wav",
-            mime_type=mime_type,
-        )
+        """Transcribe speech audio via Soniox STT and fan out translations."""
+        if not audio_bytes:
+            return {}
+
+        pcm_bytes, sample_rate, channels = self._extract_pcm16le(audio_bytes, mime_type)
+        transcribed_text = ""
+        detected_lang = source_lang
+        confidence = 1.0
+
+        try:
+            res = self.soniox.transcribe_pcm16(
+                pcm_bytes,
+                session_language_hint=source_lang,
+                sample_rate=sample_rate,
+                channels=channels,
+            )
+            transcribed_text = res.transcript.strip()
+            if res.detected_language:
+                detected_lang = res.detected_language
+            confidence = res.confidence
+            logger.info(
+                "Soniox STT output: '%s' (lang=%s, conf=%.2f)",
+                transcribed_text,
+                detected_lang,
+                confidence,
+            )
+        except Exception as exc:
+            logger.error("Soniox STT transcription failed: %s", exc)
+            if self.whisper_fallback:
+                try:
+                    transcribed_text = self.whisper_fallback.transcribe(
+                        audio_bytes,
+                        language=source_lang,
+                        filename="speech.wav",
+                        mime_type=mime_type,
+                    )
+                except Exception as whisper_exc:
+                    logger.error("Fallback Groq Whisper also failed: %s", whisper_exc)
+
         if not transcribed_text:
             return {}
+
         return self.process_utterance(
             room_code=room_code,
             speaker_id=speaker_id,
             speaker_name=speaker_name,
             text=transcribed_text,
-            source_lang=source_lang,
-            confidence=1.0,
+            source_lang=detected_lang or source_lang,
+            confidence=confidence,
         )
 
     def process_utterance(
