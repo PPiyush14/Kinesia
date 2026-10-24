@@ -35,7 +35,10 @@ selects the ASGI streaming server. Set the following in Render's Environment tab
 
 Optional defaults: `GROQ_RECAP_MODEL=openai/gpt-oss-120b`,
 `SPEECH_CLAUSE_WAIT_MS=350`, `SONIOX_MAX_ENDPOINT_DELAY_MS=1000`,
-`CARTESIA_SAMPLE_RATE=24000`, and `CARTESIA_SPEED=1.0`. Leave emotion neutral.
+`CARTESIA_SAMPLE_RATE=24000`, and `CARTESIA_SPEED=1.1`. The speaking rate is a
+modest increase to help playback keep pace. If Render already has
+`CARTESIA_SPEED=1.0`, change it to `1.1`; explicit environment values override
+the code default. Leave emotion neutral.
 See [.env.example](../.env.example) for the full configuration.
 `CARTESIA_VOICE_MAP` accepts language-to-voice JSON overrides. Old
 `CHANNEL_1_CARTESIA_*` / `CHANNEL_2_CARTESIA_*` overrides take precedence over

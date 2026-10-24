@@ -1,5 +1,21 @@
 # Kinesia pipeline audit and fixes
 
+## Speaking-rate adjustment: 2026-10-25
+
+Raised the Cartesia speaking-rate default from `1.0` to `1.1`, and updated the
+ignored local `.env`, example environment, and Render guide. Render's existing
+`CARTESIA_SPEED` value takes precedence: change it to `1.1` there before deploying.
+This modest rate is a starting point for the user's call test, not a universally
+optimal speed or a fix for recognition/network latency.
+
+Live Cartesia checks used the same synthetic text/voice per language at both
+rates. English PCM duration changed from 6,400 to 5,840 ms; Hindi changed from
+5,360 to 5,040 ms. The faster samples were roughly 6–9% shorter in this single
+comparison. Generation and connection timings varied, so no first-audio latency
+improvement is claimed from these samples. No conversation data or database was
+accessed. All 17 configuration/streaming-provider tests passed before and after
+the change, including verification that an explicit speed override is honored.
+
 ## Current release: fluent conversations, recaps, and private saved moments
 
 The working speech baseline remains preserved at

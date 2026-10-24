@@ -246,7 +246,7 @@ def load_config() -> AppConfig:
             "CARTESIA_REQUEST_TIMEOUT_SECONDS",
             15.0,
         ),
-        cartesia_speed=_env_float("CARTESIA_SPEED", 1.0),
+        cartesia_speed=_env_float("CARTESIA_SPEED", 1.1),
         cartesia_context_prefix=_env("CARTESIA_CONTEXT_PREFIX", "kinesia"),
         cartesia_emotions=_split_csv(
             _env("CARTESIA_EMOTIONS", "")

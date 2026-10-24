@@ -91,10 +91,13 @@ def test_web_configuration_defaults_to_two_provider_mode(monkeypatch, tmp_path):
     assert config.translation_provider == "soniox"
     assert config.tts_provider == "cartesia"
     assert config.cartesia_emotions == []
+    assert config.cartesia_speed == 1.1
     assert config.cartesia_request_timeout_seconds == 15
     assert config.channels["1"].cartesia_voice_id
     assert config.channels["1"].cartesia_model_id == "sonic-3.6-2026-08-27"
     assert config.missing_runtime_values() == []
+    monkeypatch.setenv("CARTESIA_SPEED", "1.05")
+    assert load_config().cartesia_speed == 1.05
 
 
 def test_soniox_mode_cannot_silently_select_another_tts_provider(monkeypatch, tmp_path):
