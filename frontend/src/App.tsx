@@ -17,12 +17,15 @@ import {
   getStoredToken,
   removeStoredToken,
   setStoredToken,
+  ApiError,
 } from '@/services/api';
 import type { Room, SessionInsights, User, ViewState } from '@/types';
 
 export default function App() {
   const [view, setViewState] = useState<ViewState>('auth');
   const [bootstrapping, setBootstrapping] = useState(true);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -78,6 +81,7 @@ export default function App() {
 
   // Bootstrap session from stored token on refresh
   useEffect(() => {
+    let cancelled = false;
     const existing = getStoredToken();
     if (!existing || existing === 'undefined' || existing === 'null' || existing.trim() === '') {
       removeStoredToken();
@@ -89,6 +93,7 @@ export default function App() {
     authService
       .getMe()
       .then((u) => {
+        if (cancelled) return;
         setUser(u);
         if (u.default_input_lang) setSpeakingLang(u.default_input_lang);
         if (u.default_output_lang) setListeningLang(u.default_output_lang);
@@ -101,6 +106,7 @@ export default function App() {
             roomService
               .getRoom(savedRoomCode)
               .then((r) => {
+                if (cancelled) return;
                 if (r && r.is_active) {
                   setRoom(r);
                   setView(savedView);
@@ -110,6 +116,7 @@ export default function App() {
                 }
               })
               .catch(() => {
+                if (cancelled) return;
                 localStorage.removeItem('kinesia_room_code');
                 setView('welcome');
               });
@@ -121,13 +128,18 @@ export default function App() {
         }
       })
       .catch((err) => {
-        console.error('Session restore failed:', err);
-        removeStoredToken();
-        setToken(null);
-        setView('auth');
+        if (cancelled) return;
+        if (err instanceof ApiError && [401, 403].includes(err.status)) {
+          removeStoredToken();
+          setToken(null);
+          setView('auth');
+        } else {
+          setRestoreError('The backend is waking up or temporarily unavailable. Your sign-in is saved.');
+        }
       })
-      .finally(() => setBootstrapping(false));
-  }, [joinPendingRoom, pendingRoomCode, setView]);
+      .finally(() => { if (!cancelled) setBootstrapping(false); });
+    return () => { cancelled = true; };
+  }, [joinPendingRoom, pendingRoomCode, setView, restoreAttempt]);
 
   const handleAuthenticated = (u: User, t: string) => {
     setStoredToken(t);
@@ -206,6 +218,21 @@ export default function App() {
     );
   }
 
+  if (restoreError) {
+    return (
+      <main className="min-h-screen flex items-center justify-center bg-canvas text-ink-primary p-6">
+        <div className="max-w-md text-center space-y-5">
+          <p role="alert">{restoreError}</p>
+          <button className="rounded-xl bg-accent px-5 py-3 text-canvas font-medium" onClick={() => {
+            setRestoreError(null);
+            setBootstrapping(true);
+            setRestoreAttempt((attempt) => attempt + 1);
+          }}>Retry connection</button>
+        </div>
+      </main>
+    );
+  }
+
   // Views that take full viewport without shell
   const isFullViewport = view === 'auth' || view === 'dialogue';
 
@@ -231,6 +258,7 @@ export default function App() {
           token={token}
           speakingLang={speakingLang}
           listeningLang={listeningLang}
+          onUpdateSpeakingLang={setSpeakingLang}
           onUpdateListeningLang={setListeningLang}
           onConcludeSession={(res) => {
             setInsights(res);

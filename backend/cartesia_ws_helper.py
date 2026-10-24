@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from typing import Iterator
 
 import websocket
@@ -24,7 +25,7 @@ class CartesiaSyncWS:
         self.version = version
         self.timeout_seconds = timeout_seconds
         self.headers = [
-            f"Authorization: Bearer {self.api_key}",
+            f"X-API-Key: {self.api_key}",
             f"Cartesia-Version: {self.version}",
         ]
         self._active_ws = None
@@ -71,17 +72,22 @@ class CartesiaSyncWS:
         if ws is None:
             return
 
+        deadline = time.monotonic() + self.timeout_seconds
         try:
             while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Cartesia speech request exceeded its deadline.")
+                ws.settimeout(remaining)
                 try:
                     message = ws.recv()
-                except websocket.WebSocketTimeoutException:
-                    continue
-                except (websocket.WebSocketConnectionClosedException, OSError):
-                    return
+                except websocket.WebSocketTimeoutException as exc:
+                    raise TimeoutError("Cartesia speech request timed out.") from exc
+                except (websocket.WebSocketConnectionClosedException, OSError) as exc:
+                    raise RuntimeError("Cartesia closed before completing speech.") from exc
 
                 if not message:
-                    return
+                    raise RuntimeError("Cartesia closed before completing speech.")
 
                 try:
                     response = json.loads(message)

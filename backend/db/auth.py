@@ -22,13 +22,15 @@ from backend.db.connection import get_db
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SECRET = "kinesia_jwt_secret_dev_key_32_chars_long_12345678"
+# Local development may run without configuration, but must never use a public
+# signing key. Set JWT_SECRET for tokens that survive process restarts.
+_DEFAULT_SECRET = secrets.token_urlsafe(48)
 _TOKEN_TTL_SECONDS = 7 * 86400  # 7 days
 
 
 def _get_signing_key() -> bytes:
     """Return secret signing key from environment or default."""
-    secret = os.getenv("JWT_SECRET", _DEFAULT_SECRET).strip()
+    secret = os.getenv("JWT_SECRET", "").strip() or _DEFAULT_SECRET
     return secret.encode("utf-8")
 
 

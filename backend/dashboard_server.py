@@ -5,6 +5,7 @@ import logging
 import mimetypes
 import os
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -30,6 +31,7 @@ from backend.storage.glossary import GlossaryStore
 from backend.db.auth import authenticate_user, get_user_profile, register_user, verify_token, update_user_profile, delete_user_account
 from backend.db.connection import init_db
 from backend.db.rooms import (
+    add_participant,
     create_room,
     get_room_by_code,
     clear_room_transcripts,
@@ -107,7 +109,11 @@ class DashboardState:
 
         self.glossary_store = GlossaryStore(base_config.project_root)
         self.gemma_client = GemmaClient(base_config)
-        self.summarizer = ConversationSummarizer(self.gemma_client)
+        if base_config.translation_provider == "soniox":
+            from backend.nlp.extractive_summary import ExtractiveSummarizer
+            self.summarizer = ExtractiveSummarizer()
+        else:
+            self.summarizer = ConversationSummarizer(self.gemma_client)
         self.aggregator = BIAggregator()
         self.webhook = WebhookDispatcher(base_config.webhook_url, base_config.webhook_secret)
         try:
@@ -119,6 +125,8 @@ class DashboardState:
         try:
             init_db()
         except Exception as exc:
+            if base_config.translation_provider == "soniox":
+                raise RuntimeError("Database initialization failed. Check DATABASE_URL on the backend service.") from None
             logger.warning("Database initialization notice: %s", exc)
         self.coordinator = RoomCoordinator(base_config)
 
@@ -1062,6 +1070,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
+        try:
+            self._stream_room_events(room_code, user_profile, room, event_queue)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.close_connection = True
+            self.state.coordinator.leave_room(room_code, user_profile["id"], event_queue=event_queue)
+
+    def _stream_room_events(self, room_code, user_profile, room, event_queue) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
@@ -1094,17 +1111,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self._write_sse_event("connected", init_event)
         self._write_sse_event("participants", participants_list)
 
-        try:
-            while True:
-                try:
-                    event = event_queue.get(timeout=15.0)
-                    self._write_sse_event(event.get("type", "message"), event.get("data", {}))
-                except queue.Empty:
-                    self._write_sse_comment("keepalive")
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            self.state.coordinator.leave_room(room_code, user_profile["id"])
+        while True:
+            with self.state.coordinator._lock:
+                participant = room.participants.get(user_profile["id"])
+                if participant is None or participant.event_queue is not event_queue:
+                    return
+            try:
+                event = event_queue.get(timeout=15.0)
+                self._write_sse_event(event.get("type", "message"), event.get("data", {}))
+                if event.get("type") in {"session_concluded", "session_ended"}:
+                    return
+            except queue.Empty:
+                self._write_sse_comment("keepalive")
 
     def do_GET(self) -> None:  # noqa: N802
         parsed_url = urlparse(self.path)
@@ -1226,6 +1244,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not room:
                     self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
                     return
+                user = self._get_auth_user()
+                if not user:
+                    self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                    return
+                try:
+                    self.state.coordinator.ensure_room_access(room_code, user["id"])
+                except ValueError as exc:
+                    self._send_v1_error(str(exc), status=HTTPStatus.FORBIDDEN)
+                    return
                 coord_room = self.state.coordinator.active_rooms.get(room_code.lower())
                 participants = []
                 if coord_room:
@@ -1267,7 +1294,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not room:
                     self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
                     return
-                self._send_v1_json(get_session_insights(room["id"]) or {})
+                user = self._get_auth_user()
+                if not user:
+                    self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                    return
+                if not is_room_member(room["id"], user["id"]):
+                    self._send_v1_error("Forbidden: Only room participants can view insights", status=HTTPStatus.FORBIDDEN)
+                    return
+                insights = get_session_insights(room["id"]) or {}
+                insights["summary_method"] = "extractive" if self.state.base_config.translation_provider == "soniox" else "llm"
+                self._send_v1_json(insights)
                 return
 
             if len(parts) == 1:
@@ -1361,7 +1397,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 )
             elif path.startswith("/api/v1/rooms/") and path.endswith("/verify"):
                 room_code = path.split("/")[4]
-                response = {"valid": verify_room_access(room_code, payload.get("passcode"))}
+                valid = verify_room_access(room_code, payload.get("passcode"))
+                user = self._get_auth_user()
+                if valid and user:
+                    room = get_room_by_code(room_code)
+                    if room and not is_room_member(room["id"], user["id"]):
+                        add_participant(room["id"], user["id"], user.get("display_name") or user["username"])
+                response = {"valid": valid}
             elif path.startswith("/api/v1/rooms/") and path.endswith("/speak"):
                 user = self._get_auth_user()
                 if not user:
@@ -1375,6 +1417,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     text=payload.get("text", ""),
                     source_lang=payload.get("source_lang", "en"),
                     confidence=float(payload.get("confidence", 1.0)),
+                    utterance_id=payload.get("utterance_id"),
                 )
             elif path.startswith("/api/v1/rooms/") and path.endswith("/speak-audio"):
                 user = self._get_auth_user()
@@ -1398,6 +1441,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     audio_bytes=audio_bytes,
                     source_lang=payload.get("source_lang", "en"),
                     mime_type=mime,
+                    utterance_id=payload.get("utterance_id"),
                 )
             elif path.startswith("/api/v1/rooms/") and path.endswith("/leave"):
                 user = self._get_auth_user()
@@ -1467,6 +1511,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
                 return
             try:
+                self.state.coordinator.remove_hosted_cached_rooms(user["id"])
                 delete_user_account(user["id"])
                 self._send_v1_json({"ok": True, "message": "Account successfully deleted"})
                 return
@@ -1474,11 +1519,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_v1_error(f"Failed to delete account: {exc}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
 
-        if path == "/api/v1/rooms/clear-all":
+        if path in {"/api/v1/rooms", "/api/v1/rooms/clear-all"}:
             user = self._get_auth_user()
             if not user:
                 self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
                 return
+            self.state.coordinator.remove_hosted_cached_rooms(user["id"])
             clear_all_rooms(user["id"])
             self._send_v1_json({"ok": True, "message": "All rooms cleared"})
             return
@@ -1519,8 +1565,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not room:
                     self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
                     return
+                if str(room["host_id"]) != str(user["id"]):
+                    self._send_v1_error("Only the host can delete this room", status=HTTPStatus.FORBIDDEN)
+                    return
+                self.state.coordinator.remove_cached_room(room_code)
                 delete_room(room_code)
-                self.state.coordinator.active_rooms.pop(room_code.strip().lower(), None)
                 self._send_v1_json({"ok": True, "message": "Room deleted"})
                 return
 
@@ -1584,45 +1633,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
-    def do_DELETE(self) -> None:  # noqa: N802
-        parsed_url = urlparse(self.path)
-        path = parsed_url.path
-
-        # DELETE /api/v1/rooms/clear-all or /api/v1/rooms
-        if path in {"/api/v1/rooms", "/api/v1/rooms/clear-all"}:
-            user = self._get_auth_user()
-            if not user:
-                self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
-                return
-            count = clear_all_rooms(user["id"])
-            self._send_v1_json({"ok": True, "message": f"Cleared {count} sessions"})
-            return
-
-        # DELETE /api/v1/rooms/{room_code}
-        if path.startswith("/api/v1/rooms/"):
-            user = self._get_auth_user()
-            if not user:
-                self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
-                return
-            parts = path.split("/")
-            if len(parts) >= 5:
-                room_code = parts[4]
-                # Also clean up from active memory if currently open
-                try:
-                    self.state.coordinator.active_rooms.pop(room_code.lower(), None)
-                except Exception:
-                    pass
-                success = delete_room(room_code)
-                if success:
-                    self._send_v1_json({"ok": True, "message": f"Session {room_code} deleted"})
-                else:
-                    self._send_v1_error(f"Session {room_code} not found", status=HTTPStatus.NOT_FOUND)
-                return
-
-        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
-
     def log_message(self, format: str, *args) -> None:  # noqa: A003
-        logger.debug("dashboard_http " + format, *args)
+        # EventSource authenticates via the query string; never log its token.
+        safe_args = tuple(
+            re.sub(r"([?&]token=)[^&\s\"]+", r"\1[REDACTED]", arg) if isinstance(arg, str) else arg
+            for arg in args
+        )
+        logger.debug("dashboard_http " + format, *safe_args)
 
     def _read_json_body(self) -> Any:
         content_length = int(self.headers.get("Content-Length", "0") or "0")
@@ -1733,6 +1750,10 @@ def run_dashboard_server(
     host: str = "127.0.0.1",
     port: int = 8765,
 ) -> None:
+    if config.translation_provider == "soniox":
+        from backend.realtime_server import run_realtime_server
+        run_realtime_server(config, host=host, port=port)
+        return
     state = DashboardState(config)
 
     class Handler(DashboardRequestHandler):
@@ -1792,6 +1813,10 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     config = load_config()
+    if config.translation_provider == "soniox":
+        from backend.realtime_server import run_realtime_server
+        run_realtime_server(config)
+        return
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "8765"))
     run_dashboard_server(config, host=host, port=port)

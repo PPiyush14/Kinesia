@@ -85,10 +85,11 @@ export function InsightsView({ room, insights, onReturnToWorkspace, onReturnToHo
           <CardHeader>
             <div className="flex items-center gap-2">
               <FileText size={16} className="text-accent" />
-              <h2 className="text-sm font-semibold text-ink-primary">Executive summary</h2>
+              <h2 className="text-sm font-semibold text-ink-primary">{insights?.summary_method === 'extractive' ? 'Session overview' : 'Executive summary'}</h2>
             </div>
           </CardHeader>
           <CardContent>
+            {insights?.summary_method === 'extractive' && <p className="mb-3 text-xs leading-relaxed text-ink-muted">Notes are selected from the actual transcript. Possible commitments are quoted for your review, without inferred owners or deadlines.</p>}
             <p className="text-sm text-ink-secondary leading-relaxed whitespace-pre-wrap">{summary}</p>
           </CardContent>
         </Card>
@@ -119,7 +120,7 @@ export function InsightsView({ room, insights, onReturnToWorkspace, onReturnToHo
             <CardHeader>
               <div className="flex items-center gap-2">
                 <ListTodo size={16} className="text-warn" />
-                <h2 className="text-sm font-semibold text-ink-primary">Action items</h2>
+                <h2 className="text-sm font-semibold text-ink-primary">{insights?.summary_method === 'extractive' ? 'Possible commitments — review' : 'Action items'}</h2>
               </div>
             </CardHeader>
             <CardContent>

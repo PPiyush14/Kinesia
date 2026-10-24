@@ -23,6 +23,7 @@ export function useSonioxAudioCapture({
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const captureGenerationRef = useRef(0);
 
   // Speech buffering state
   const isSpeakingRef = useRef(false);
@@ -86,11 +87,14 @@ export function useSonioxAudioCapture({
   }, []);
 
   const stopCapture = useCallback(() => {
+    // Invalidate getUserMedia calls that are still waiting for permission.
+    captureGenerationRef.current += 1;
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
     if (processorRef.current) {
+      processorRef.current.onaudioprocess = null;
       processorRef.current.disconnect();
       processorRef.current = null;
     }
@@ -119,9 +123,10 @@ export function useSonioxAudioCapture({
       return;
     }
 
-    try {
-      stopCapture();
+    stopCapture();
+    const generation = captureGenerationRef.current;
 
+    try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -129,6 +134,11 @@ export function useSonioxAudioCapture({
           autoGainControl: true,
         },
       });
+
+      if (generation !== captureGenerationRef.current || !enabledRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
 
       streamRef.current = stream;
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
@@ -145,7 +155,7 @@ export function useSonioxAudioCapture({
       const preRollMaxFrames = 8; // ~300ms pre-roll to prevent cutting off the first word
 
       processor.onaudioprocess = (e) => {
-        if (!enabledRef.current) return;
+        if (!enabledRef.current || generation !== captureGenerationRef.current) return;
 
         // Acoustic echo ducking: ignore mic while peer speech/TTS is playing
         if (isDuckedRef.current) {
@@ -180,7 +190,8 @@ export function useSonioxAudioCapture({
             speechStartTimeRef.current = Date.now();
 
             // Include pre-roll
-            audioChunksRef.current = [...preRollBufferRef.current, frameCopy];
+            // The triggering frame is already the last pre-roll entry.
+            audioChunksRef.current = [...preRollBufferRef.current];
             preRollBufferRef.current = [];
           }
         } else {
@@ -215,8 +226,10 @@ export function useSonioxAudioCapture({
 
       setIsRecording(true);
     } catch (err) {
+      if (generation !== captureGenerationRef.current) return;
       console.warn('Microphone access denied or error:', err);
-      setIsRecording(false);
+      // A failed setup may already own a stream or an AudioContext.
+      stopCapture();
     }
   }, [energyThreshold, flushUtterance, silenceThresholdMs, stopCapture]);
 

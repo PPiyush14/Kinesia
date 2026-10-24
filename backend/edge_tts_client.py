@@ -104,17 +104,19 @@ class EdgeTtsClient:
                         buf.write(chunk["data"])
                 return buf.getvalue()
 
-            # Run in a dedicated asyncio loop if already in an async event loop
+            async def _bounded_synthesize() -> bytes:
+                return await asyncio.wait_for(_synthesize(), timeout=15)
+
+            # Only catch the absence of an event loop. A provider RuntimeError
+            # must not silently trigger a second synthesis request.
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        return pool.submit(lambda: asyncio.run(_synthesize())).result(timeout=15)
-                else:
-                    return loop.run_until_complete(_synthesize())
+                asyncio.get_running_loop()
             except RuntimeError:
-                return asyncio.run(_synthesize())
+                return asyncio.run(_bounded_synthesize())
+            else:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(lambda: asyncio.run(_bounded_synthesize())).result(timeout=18)
 
         except Exception as exc:
             logger.warning("Edge-TTS synthesis error for lang %s: %s", language, exc)

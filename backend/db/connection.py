@@ -95,7 +95,7 @@ def get_db() -> Generator[DatabaseConnection, None, None]:
     if is_postgres():
         import psycopg2
 
-        raw_conn = psycopg2.connect(url)
+        raw_conn = psycopg2.connect(url, connect_timeout=8)
         conn_obj = DatabaseConnection(raw_conn, is_pg=True)
     else:
         db_path = _get_sqlite_path()

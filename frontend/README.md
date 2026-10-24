@@ -5,7 +5,7 @@ React + TypeScript SPA for the Kinesia real-time multilingual dialogue platform.
 ## Stack
 
 - React 18 + TypeScript (strict)
-- Vite 5
+- Vite 7 (Node 20.19+)
 - Tailwind CSS 3
 - Framer Motion
 - Lucide React
@@ -24,7 +24,7 @@ src/
     lobby/
     dialogue/
     insights/
-  hooks/             # SSE, speech dictation, audio meter
+  hooks/             # WebSocket rooms, microphone and playback lifecycle
   services/          # REST API client
   lib/               # utilities
   types/             # shared contracts
@@ -35,8 +35,10 @@ src/
 ```bash
 npm install
 npm run dev        # http://localhost:5173 (proxies API to :8765)
-npm run build      # writes to ../src/pi_translator/web
+npm run build      # writes to ../backend/web
 npm run typecheck
 ```
 
-Requires the Python backend on port 8765 for API and SSE.
+Requires the Python backend on port 8765 for REST and WebSocket audio.
+Set `VITE_API_BASE_URL` before building for a separate Render frontend service.
+See [Render deployment](../docs/RENDER_DEPLOYMENT.md) for configuration and checks.

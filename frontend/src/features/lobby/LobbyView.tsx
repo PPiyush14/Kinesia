@@ -92,7 +92,7 @@ export function LobbyView({
         osc.stop(now + idx * 0.12 + 0.45);
       });
 
-      setTimeout(() => setPlayingTestAudio(false), 800);
+      setTimeout(() => { setPlayingTestAudio(false); void ctx.close(); }, 800);
     } catch {
       setPlayingTestAudio(false);
     }
@@ -275,7 +275,10 @@ export function LobbyView({
           {/* Enter Button */}
           <Button
             size="lg"
-            onClick={onEnterRoom}
+            onClick={() => {
+              sessionStorage.setItem('kinesia_join_muted', String(!micEnabled || permissionDenied));
+              onEnterRoom();
+            }}
             rightIcon={<ArrowRight size={18} />}
             className="w-full py-4 text-base font-semibold shadow-lg shadow-accent/25"
           >

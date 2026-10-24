@@ -15,6 +15,13 @@ from backend.conversation_store import SessionConversationStore
 from backend.storage.glossary import GlossaryEntry, GlossaryStore
 
 
+@pytest.fixture(autouse=True)
+def isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Never let integration server startup touch the developer's database."""
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setattr("backend.db.connection._get_sqlite_path", lambda: tmp_path / "isolated.db")
+
+
 @pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
     """Provides an isolated temporary directory for test file I/O."""

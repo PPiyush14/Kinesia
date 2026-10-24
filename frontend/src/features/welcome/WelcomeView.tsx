@@ -33,7 +33,7 @@ const features = [
     icon: Sparkles,
     color: 'text-accent',
     bg: 'bg-accent/10',
-    title: 'Instant Speech Translation',
+    title: 'Live Speech Translation',
     desc: 'Speak naturally in your language. Everyone hears and reads in theirs — simultaneously.',
   },
   {
@@ -48,14 +48,14 @@ const features = [
     color: 'text-warn',
     bg: 'bg-warn/10',
     title: 'Conversation Intelligence',
-    desc: 'When a session ends, Kinesia auto-generates an executive summary, key points, and action items.',
+    desc: 'Review saved transcripts, selected discussion excerpts, and possible commitments after your session.',
   },
   {
     icon: ShieldCheck,
     color: 'text-ink-secondary',
     bg: 'bg-surface-3',
     title: 'Private & Secure',
-    desc: 'Rooms are invite-only. Transcripts and conversation notes are visible only to participants.',
+    desc: 'Protect a room with a passcode. Transcripts and session notes are available to its participants.',
   },
 ];
 
@@ -130,7 +130,7 @@ export function WelcomeView({
             </h1>
             <p className="text-base sm:text-lg text-ink-secondary leading-relaxed max-w-2xl">
               Speak in your language. Your teammates hear and read in theirs.
-              Hold seamless multilingual conversations with instant voice translation and automated notes.
+              Speak across languages with live translated audio, readable captions, and grounded session notes.
             </p>
           </div>
 
@@ -347,4 +347,4 @@ export function WelcomeView({
       </div>
     </div>
   );
-}
+}

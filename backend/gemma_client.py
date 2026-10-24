@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -46,6 +48,9 @@ class GemmaClient:
             "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
             "messages": messages,
         }
+        if urlparse(self.base_url).hostname == "api.groq.com" and self.model.lower().startswith("qwen/qwen3"):
+            # Groq's raw reasoning format may put <think> text in content.
+            payload["reasoning_format"] = "hidden"
 
         try:
             response = self.session.post(
@@ -73,7 +78,13 @@ class GemmaClient:
 
         message = choices[0].get("message", {})
         content = message.get("content", "")
-        return self._content_to_text(content).strip()
+        if choices[0].get("finish_reason") == "length":
+            raise TranslationError("Gemma response was truncated by the token limit.")
+        text = self._content_to_text(content)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # An unfinished reasoning block has no safe user-visible answer.
+        text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        return text.strip()
 
     def translate(
         self,
@@ -148,7 +159,7 @@ class GemmaClient:
             "NEVER echo back untranslated English words when target is Hindi or another Indian language.\n"
             "2. CONVERSATIONAL ACCURACY: Maintain informal tone, humor, sentence pacing, and natural flow.\n"
             "3. CLEAN FORMAT: Return ONLY the direct translation. Do not add quotes, markdown, explanations, speaker tags, or notes.\n"
-            "4. GRAMMAR & NATURAL DIALOGUE: If the user transcript contains speech stutter, repeated words (e.g. 'hello hello', 'I I think'), or fragmented artifacts, output a single clean, natural, grammatically correct sentence without any repetitions."
+            "4. GRAMMAR & NATURAL DIALOGUE: Preserve the speaker's meaning, including intentional repetition, emphasis, and grammatical repeated words. Do not remove words merely because they repeat."
         )
         if listener_channel.translation_hint.strip():
             prompt += f" Additional instruction: {listener_channel.translation_hint.strip()}"
@@ -168,6 +179,8 @@ class GemmaClient:
 
     @staticmethod
     def _content_to_text(content: Any) -> str:
+        if content is None:
+            return ""
         if isinstance(content, str):
             return content
         if isinstance(content, list):
@@ -180,7 +193,7 @@ class GemmaClient:
                     if isinstance(text, str):
                         parts.append(text)
             return "".join(parts)
-        return str(content)
+        return ""
 
     def _headers(self) -> dict[str, str]:
         headers = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from dotenv import load_dotenv
 from backend.languages import default_indian_language_hints
 
 PLACEHOLDER_PREFIXES = (
+    "api-key",
+    "api_key",
     "replace-with-",
     "replace_with_",
     "your-",
@@ -17,6 +20,7 @@ PLACEHOLDER_PREFIXES = (
 )
 
 DEFAULT_GEMMA_RESPONSE_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_CARTESIA_VOICE_ID = "95d51f79-c397-46f9-b49a-23763d3eaa2d"
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,10 @@ class AppConfig:
     save_audio: bool = False
     webhook_url: str | None = None
     webhook_secret: str | None = None
+    translation_provider: str = "llm"  # Compatibility for existing programmatic clients.
+    cartesia_voice_map: dict[str, str] = field(default_factory=dict)
+    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
+    realtime_max_languages: int = 4
 
     def get_channel(self, channel_key: str) -> ChannelConfig:
         try:
@@ -105,14 +113,14 @@ class AppConfig:
 
         if _is_missing(self.soniox_api_key):
             missing.append("SONIOX_API_KEY")
-        if _is_missing(self.gemma_model):
+        if self.translation_provider != "soniox" and _is_missing(self.gemma_model):
             missing.append("GEMMA_MODEL")
         if self.tts_provider == "google":
             if self.google_tts_credentials_path is None:
                 missing.append("GOOGLE_TTS_CREDENTIALS_PATH")
             elif not self.google_tts_credentials_path.exists():
                 missing.append("GOOGLE_TTS_CREDENTIALS_PATH")
-        else:
+        elif self.tts_provider == "cartesia":
             if _is_missing(self.cartesia_api_key):
                 missing.append("CARTESIA_API_KEY")
 
@@ -146,7 +154,18 @@ def project_root() -> Path:
 def load_config() -> AppConfig:
     root = project_root()
     load_dotenv(root / ".env", override=False)
-    tts_provider = _normalize_tts_provider(_env("TTS_PROVIDER", "edge"))
+    tts_provider = _normalize_tts_provider(_env("TTS_PROVIDER", "cartesia"))
+    translation_provider = _env("TRANSLATION_PROVIDER", "soniox").lower()
+    if translation_provider not in {"soniox", "llm"}:
+        raise ValueError("TRANSLATION_PROVIDER must be soniox or llm.")
+    if translation_provider == "soniox" and tts_provider != "cartesia":
+        raise ValueError("Soniox meeting mode requires TTS_PROVIDER=cartesia.")
+    try:
+        voice_map = json.loads(_env("CARTESIA_VOICE_MAP", "{}"))
+    except ValueError as exc:
+        raise ValueError("CARTESIA_VOICE_MAP must be a JSON language-to-voice mapping.") from exc
+    if not isinstance(voice_map, dict) or any(not isinstance(k, str) or not isinstance(v, str) or not v for k, v in voice_map.items()):
+        raise ValueError("CARTESIA_VOICE_MAP must map language codes to non-empty voice IDs.")
     google_tts_credentials_path = _resolve_optional_path(
         _first_non_empty_env(
             "GOOGLE_TTS_CREDENTIALS_PATH",
@@ -181,9 +200,9 @@ def load_config() -> AppConfig:
             "SONIOX_WEBSOCKET_URL",
             "wss://stt-rt.soniox.com/transcribe-websocket",
         ),
-        soniox_max_endpoint_delay_ms=_env_int("SONIOX_MAX_ENDPOINT_DELAY_MS", 1500),
+        soniox_max_endpoint_delay_ms=_env_int("SONIOX_MAX_ENDPOINT_DELAY_MS", 1000),
         soniox_keepalive_seconds=_env_float("SONIOX_KEEPALIVE_SECONDS", 8.0),
-        soniox_session_retry_attempts=_env_int("SONIOX_SESSION_RETRY_ATTEMPTS", 6),
+        soniox_session_retry_attempts=_env_int("SONIOX_SESSION_RETRY_ATTEMPTS", 1),
         soniox_session_retry_delay_seconds=_env_float(
             "SONIOX_SESSION_RETRY_DELAY_SECONDS",
             1.0,
@@ -219,27 +238,31 @@ def load_config() -> AppConfig:
             "CARTESIA_WEBSOCKET_URL",
             "wss://api.cartesia.ai/tts/websocket",
         ).rstrip("/"),
-        cartesia_version=_env("CARTESIA_VERSION", "2026-03-01"),
+        cartesia_version=_env("CARTESIA_VERSION", "2026-08-14"),
         cartesia_request_timeout_seconds=_env_float(
             "CARTESIA_REQUEST_TIMEOUT_SECONDS",
-            60.0,
+            15.0,
         ),
-        cartesia_speed=_env_float("CARTESIA_SPEED", 0.9),
+        cartesia_speed=_env_float("CARTESIA_SPEED", 1.0),
         cartesia_context_prefix=_env("CARTESIA_CONTEXT_PREFIX", "kinesia"),
         cartesia_emotions=_split_csv(
-            _env("CARTESIA_EMOTIONS", "positivity:high,curiosity:high")
+            _env("CARTESIA_EMOTIONS", "")
         ),
         save_audio=_env("SAVE_AUDIO", "false").lower() in {"1", "true", "yes"},
         webhook_url=_env("WEBHOOK_URL", "") or None,
         webhook_secret=_env("WEBHOOK_SECRET", "") or None,
         channels=channels,
         groq_whisper_model=_env("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
+        translation_provider=translation_provider,
+        cartesia_voice_map=voice_map,
+        allowed_origins=_split_csv(_env("CORS_ORIGINS", "*")),
+        realtime_max_languages=max(1, min(8, _env_int("REALTIME_MAX_LANGUAGES", 4))),
     )
 
 
 def _load_channel(channel_key: str) -> ChannelConfig:
     prefix = f"CHANNEL_{channel_key}_"
-    source_language = _env(f"{prefix}SOURCE_LANGUAGE", "")
+    source_language = _env(f"{prefix}SOURCE_LANGUAGE", "en" if channel_key == "1" else "hi")
     raw_hints = _env(f"{prefix}SONIOX_LANGUAGE_HINTS", "")
     soniox_language_hints = _split_csv(raw_hints) or default_indian_language_hints()
     return ChannelConfig(
@@ -251,9 +274,9 @@ def _load_channel(channel_key: str) -> ChannelConfig:
         ),
         input_sample_rate=_env_optional_int(f"{prefix}INPUT_SAMPLE_RATE"),
         soniox_language_hints=soniox_language_hints,
-        cartesia_voice_id=_env(f"{prefix}CARTESIA_VOICE_ID", ""),
-        cartesia_model_id=_env(f"{prefix}CARTESIA_MODEL_ID", "sonic-3.5"),
-        cartesia_sample_rate=_env_int(f"{prefix}CARTESIA_SAMPLE_RATE", 24000),
+        cartesia_voice_id=_env(f"{prefix}CARTESIA_VOICE_ID", _env("CARTESIA_VOICE_ID", DEFAULT_CARTESIA_VOICE_ID)),
+        cartesia_model_id=_env(f"{prefix}CARTESIA_MODEL_ID", _env("CARTESIA_MODEL_ID", "sonic-3.6-2026-08-27")),
+        cartesia_sample_rate=_env_int(f"{prefix}CARTESIA_SAMPLE_RATE", _env_int("CARTESIA_SAMPLE_RATE", 24000)),
         google_tts_language_code=_env(f"{prefix}GOOGLE_TTS_LANGUAGE_CODE", ""),
         google_tts_voice_name=_env(f"{prefix}GOOGLE_TTS_VOICE_NAME", ""),
         google_tts_voice_gender=_env(

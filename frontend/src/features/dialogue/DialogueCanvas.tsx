@@ -1,31 +1,35 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
+  ArrowLeft,
+  Check,
+  ChevronDown,
+  Copy,
+  Download,
+  FileText,
+  Headphones,
+  Languages,
   Mic,
   MicOff,
+  PhoneOff,
+  Radio,
+  RefreshCw,
+  Send,
+  ShieldCheck,
+  Trash2,
+  Users,
   Volume2,
   VolumeX,
-  FileText,
-  Share2,
-  PhoneOff,
-  Send,
   X,
-  Languages,
-  ArrowLeft,
-  Trash2,
-  AlertTriangle,
-  LogOut,
-  Copy,
 } from 'lucide-react';
-import type { Participant, Room, TranscriptTurn, User, SessionInsights } from '@/types';
-import { SUPPORTED_LANGUAGES, langShort } from '@/types';
+import type { Participant, Room, SessionInsights, TranscriptTurn, User } from '@/types';
+import { SUPPORTED_LANGUAGES, langLabel, langShort } from '@/types';
 import { roomService } from '@/services/api';
-import { useRoomSSE } from '@/hooks/useRoomSSE';
-import { mapLang } from '@/hooks/useSpeechDictation';
-import { useSonioxAudioCapture } from '@/hooks/useSonioxAudioCapture';
+import { useRealtimeRoom } from '@/hooks/useRealtimeRoom';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { cn, initials } from '@/lib/utils';
+import { mergeTranscriptHistory } from '@/lib/transcripts';
 
 interface DialogueCanvasProps {
   room: Room;
@@ -33,843 +37,612 @@ interface DialogueCanvasProps {
   token: string;
   speakingLang: string;
   listeningLang: string;
+  onUpdateSpeakingLang?: (lang: string) => void;
   onUpdateListeningLang: (lang: string) => void;
   onConcludeSession: (insights: SessionInsights) => void;
   onLeaveRoom: () => void;
-  onToast: (msg: string, tone?: 'success' | 'error' | 'info') => void;
+  onToast: (message: string, tone?: 'success' | 'error' | 'info') => void;
   onCopyInvite: () => void;
 }
 
-export function DialogueCanvas({
-  room,
-  currentUser,
-  token,
-  speakingLang,
-  listeningLang,
-  onUpdateListeningLang,
-  onConcludeSession,
-  onLeaveRoom,
-  onToast,
-  onCopyInvite,
-}: DialogueCanvasProps) {
-  const isHost = Boolean(room.host_id && String(room.host_id) === String(currentUser.id));
-  const [participants, setParticipants] = useState<Participant[]>([
-    {
-      user_id: currentUser.id,
-      user_name: currentUser.display_name || currentUser.username,
-      avatar_color: currentUser.avatar_color || '#10B981',
-      speaking_lang: speakingLang,
-      listening_lang: listeningLang,
-    },
-  ]);
-  const [speakingUserId, setSpeakingUserId] = useState<string | number | null>(null);
-  const [isMicMuted, setIsMicMuted] = useState(false);
-  const [isAudioMuted, setIsAudioMuted] = useState(false);
-  const [inputText, setInputText] = useState('');
-  const [drawerOpen, setDrawerOpen] = useState(false);
+export function DialogueCanvas(props: DialogueCanvasProps) {
+  const { room, currentUser, token, speakingLang, listeningLang, onToast } = props;
+  const isHost = String(room.host_id) === String(currentUser.id);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [micMuted, setMicMuted] = useState(() => sessionStorage.getItem('kinesia_join_muted') === 'true');
+  const [audioMuted, setAudioMuted] = useState(false);
   const [transcripts, setTranscripts] = useState<TranscriptTurn[]>([]);
-  const [activeSubtitle, setActiveSubtitle] = useState<TranscriptTurn | null>(null);
-  const [ending, setEnding] = useState(false);
-  const [leaving, setLeaving] = useState(false);
-  const [clearing, setClearing] = useState(false);
-  const [showLeaveModal, setShowLeaveModal] = useState(false);
-  const [showEndModal, setShowEndModal] = useState(false);
-  const [showClearModal, setShowClearModal] = useState(false);
-  const [connected, setConnected] = useState(false);
-  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
-  const [liveInterim, setLiveInterim] = useState('');
+  const [caption, setCaption] = useState<TranscriptTurn | null>(null);
+  const [ownCaption, setOwnCaption] = useState('');
+  const [speakingId, setSpeakingId] = useState<string | number | null>(null);
+  const [drawer, setDrawer] = useState(false);
+  const [original, setOriginal] = useState(true);
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [modal, setModal] = useState<'leave' | 'end' | 'clear' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const actions = useRef<{ playEncoded: (url: string) => void; cancelAudio: () => void } | null>(null);
+  const completed = useRef(false);
+  const speakingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scroll = useRef<HTMLDivElement | null>(null);
 
-  const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const subtitleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-
-  // Load existing transcripts & participants on mount
-  useEffect(() => {
-    roomService
-      .getTranscripts(room.room_code)
-      .then((data) => {
-        if (Array.isArray(data)) setTranscripts(data);
-      })
-      .catch((err) => {
-        console.error('Could not fetch transcripts', err);
-      });
-
-    roomService
-      .getParticipants(room.room_code)
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const seen = new Set<string>();
-          const deduped: Participant[] = [];
-          for (const item of data) {
-            const sid = String(item.user_id);
-            if (!seen.has(sid)) {
-              seen.add(sid);
-              deduped.push(item);
-            }
-          }
-          const myId = String(currentUser.id);
-          if (!deduped.some((p) => String(p.user_id) === myId)) {
-            deduped.unshift({
-              user_id: currentUser.id,
-              user_name: currentUser.display_name || currentUser.username,
-              avatar_color: currentUser.avatar_color || '#10B981',
-              speaking_lang: speakingLang,
-              listening_lang: listeningLang,
-              is_muted: isMicMuted,
-            });
-          }
-          setParticipants(deduped);
-        }
-      })
-      .catch((err) => {
-        console.warn('Could not fetch initial participants', err);
-      });
-  }, [room.room_code, currentUser, speakingLang, listeningLang, isMicMuted]);
-
-  // Audio queue for incoming TTS to prevent interruptions, stuttering, and browser autoplay blocks
-  const audioQueueRef = useRef<string[]>([]);
-  const isPlayingRef = useRef<boolean>(false);
-  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
-
-  const processAudioQueue = useCallback(() => {
-    if (isAudioMuted || isPlayingRef.current || audioQueueRef.current.length === 0) {
-      return;
-    }
-    const nextUrl = audioQueueRef.current[0];
-    if (!nextUrl) {
-      audioQueueRef.current.shift();
-      return;
-    }
-
-    if (!audioRef.current) {
-      audioRef.current = new Audio();
-    }
-    const audio = audioRef.current;
-    const savedOutput = typeof localStorage !== 'undefined' ? localStorage.getItem('kinesia_audio_output') : null;
-    if (savedOutput && savedOutput !== 'default' && typeof (audio as any).setSinkId === 'function') {
-      (audio as any).setSinkId(savedOutput).catch(() => {});
-    }
-
-    isPlayingRef.current = true;
-    setIsPlayingAudio(true);
-
-    audio.src = nextUrl;
-    audio.onended = () => {
-      audioQueueRef.current.shift();
-      isPlayingRef.current = false;
-      setIsPlayingAudio(false);
-      processAudioQueue();
-    };
-    audio.onerror = () => {
-      audioQueueRef.current.shift();
-      isPlayingRef.current = false;
-      setIsPlayingAudio(false);
-      processAudioQueue();
-    };
-
-    audio.play()
-      .then(() => {
-        setAutoplayBlocked(false);
-      })
-      .catch((err) => {
-        console.warn('Autoplay blocked by browser policy:', err);
-        isPlayingRef.current = false;
-        setIsPlayingAudio(false);
-        setAutoplayBlocked(true);
-      });
-  }, [isAudioMuted]);
-
-  const queueAudio = useCallback(
-    (audioDataUrl: string) => {
-      if (isAudioMuted || !audioDataUrl) return;
-      audioQueueRef.current.push(audioDataUrl);
-      processAudioQueue();
-    },
-    [isAudioMuted, processAudioQueue]
-  );
-
-  const unlockAndResumeAudio = useCallback(() => {
-    setAutoplayBlocked(false);
-    if (!audioRef.current) {
-      audioRef.current = new Audio();
-    }
-    audioRef.current.play().then(() => {
-      processAudioQueue();
-    }).catch(() => {
-      processAudioQueue();
-    });
-  }, [processAudioQueue]);
-
-  useEffect(() => {
-    const handleFirstGesture = () => {
-      unlockAndResumeAudio();
-      window.removeEventListener('click', handleFirstGesture);
-      window.removeEventListener('keydown', handleFirstGesture);
-    };
-    window.addEventListener('click', handleFirstGesture);
-    window.addEventListener('keydown', handleFirstGesture);
-    return () => {
-      window.removeEventListener('click', handleFirstGesture);
-      window.removeEventListener('keydown', handleFirstGesture);
-    };
-  }, [unlockAndResumeAudio]);
-
-  const handleTranscriptTurn = useCallback(
-    (turn: TranscriptTurn) => {
-      setTranscripts((prev) => [...prev, turn]);
-      setActiveSubtitle(turn);
-
-      if (turn.speaker_id != null) {
-        setSpeakingUserId(turn.speaker_id);
-        if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
-        speakingTimerRef.current = setTimeout(() => setSpeakingUserId(null), 2500);
-      }
-
-      if (subtitleTimerRef.current) clearTimeout(subtitleTimerRef.current);
-      subtitleTimerRef.current = setTimeout(() => setActiveSubtitle(null), 6000);
-
-      const isMe = String(turn.speaker_id) === String(currentUser.id);
-      if (turn.audio_data_url && !isMe) {
-        queueAudio(turn.audio_data_url);
-      } else if (
-        !isAudioMuted &&
-        turn.localized_text &&
-        !isMe &&
-        typeof window !== 'undefined' &&
-        'speechSynthesis' in window
-      ) {
-        try {
-          const utterance = new SpeechSynthesisUtterance(turn.localized_text);
-          utterance.lang = mapLang(listeningLang || turn.listening_lang || 'en');
-          utterance.onstart = () => setIsPlayingAudio(true);
-          utterance.onend = () => setIsPlayingAudio(false);
-          utterance.onerror = () => setIsPlayingAudio(false);
-          window.speechSynthesis.speak(utterance);
-        } catch {
-          setIsPlayingAudio(false);
-        }
-      }
-    },
-    [currentUser.id, isAudioMuted, listeningLang, queueAudio]
-  );
-
-  useRoomSSE(
+  const finish = (insights: SessionInsights) => {
+    if (completed.current) return;
+    completed.current = true;
+    actions.current?.cancelAudio();
+    props.onConcludeSession(insights);
+  };
+  const live = useRealtimeRoom(
     room.room_code,
     token,
     {
-      onOpen: () => setConnected(true),
-      onError: () => setConnected(false),
-      onTurn: handleTranscriptTurn,
-      onParticipants: (list: Participant[]) => {
-        if (Array.isArray(list) && list.length > 0) {
-          const seen = new Set<string>();
-          const deduped: Participant[] = [];
-          for (const item of list) {
-            const sid = String(item.user_id);
-            if (!seen.has(sid)) {
-              seen.add(sid);
-              deduped.push(item);
-            }
-          }
-          const myId = String(currentUser.id);
-          if (!deduped.some((p) => String(p.user_id) === myId)) {
-            deduped.unshift({
-              user_id: currentUser.id,
-              user_name: currentUser.display_name || currentUser.username,
-              avatar_color: currentUser.avatar_color || '#10B981',
-              speaking_lang: speakingLang,
-              listening_lang: listeningLang,
-              is_muted: isMicMuted,
-            });
-          }
-          setParticipants(deduped);
+      onParticipants: setParticipants,
+      onParticipantJoined: (participant) => {
+        setParticipants((previous) => [
+          ...previous.filter((item) => String(item.user_id) !== String(participant.user_id)),
+          participant,
+        ]);
+      },
+      onParticipantLeft: (id) =>
+        setParticipants((previous) => previous.filter((item) => String(item.user_id) !== String(id))),
+      onSpeaking: (id) => {
+        setSpeakingId(id);
+        if (speakingTimer.current) clearTimeout(speakingTimer.current);
+        speakingTimer.current = setTimeout(() => setSpeakingId(null), 2200);
+      },
+      onCaption: (turn) => {
+        if (String(turn.speaker_id) === String(currentUser.id)) setOwnCaption(turn.original_text);
+        else if (turn.localized_text && turn.listening_lang === listeningLang) setCaption(turn);
+      },
+      onTurn: (turn) => {
+        const id = String(turn.turn_id ?? turn.id);
+        setTranscripts((previous) => {
+          const index = previous.findIndex((item) => String(item.turn_id ?? item.id) === id);
+          return index < 0
+            ? [...previous, turn]
+            : previous.map((item, position) => (position === index ? turn : item));
+        });
+        if (String(turn.speaker_id) === String(currentUser.id)) setOwnCaption('');
+        else {
+          setCaption(turn);
+          if (turn.audio_data_url) actions.current?.playEncoded(turn.audio_data_url);
         }
       },
-      onParticipantJoined: (p: Participant) => {
-        setParticipants((prev) => {
-          const exists = prev.some((x) => String(x.user_id) === String(p.user_id));
-          return exists ? prev.map((x) => (String(x.user_id) === String(p.user_id) ? p : x)) : [...prev, p];
-        });
-        onToast(`${p.user_name} joined the conversation`, 'info');
-      },
-      onParticipantLeft: (uid: string | number) => {
-        setParticipants((prev) => prev.filter((x) => String(x.user_id) !== String(uid)));
-      },
-      onSpeaking: (uid: number | string) => {
-        setSpeakingUserId(uid);
-        if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
-        speakingTimerRef.current = setTimeout(() => setSpeakingUserId(null), 2500);
-      },
-      onSessionConcluded: (res) => {
-        onToast('Conversation concluded by host', 'info');
-        onConcludeSession(res as SessionInsights);
-      },
+      onSessionConcluded: (insights) => finish(insights as SessionInsights),
       onTranscriptsCleared: () => {
         setTranscripts([]);
-        setActiveSubtitle(null);
-        onToast('Conversation logs cleared', 'info');
+        setCaption(null);
+        onToast('Conversation transcript cleared', 'info');
       },
     },
-    { speakingLang, listeningLang }
+    { speakingLang, listeningLang, micMuted, audioMuted }
   );
-
-  // Soniox Audio Speech Capture & Streaming
-  const handleAudioUtterance = useCallback(
-    async (base64Wav: string, mimeType: string) => {
-      if (isMicMuted) return;
-      try {
-        await roomService.speakAudio(room.room_code, {
-          audio_base64: base64Wav,
-          source_lang: speakingLang,
-          mime_type: mimeType,
-        });
-      } catch (err) {
-        onToast(err instanceof Error ? err.message : 'Failed to send speech audio', 'error');
-      }
-    },
-    [isMicMuted, room.room_code, speakingLang, onToast]
-  );
-
-  const { isSpeaking: isLocalSpeaking, supported: audioSupported } = useSonioxAudioCapture({
-    enabled: !isMicMuted,
-    duckDuringPlayback: isPlayingAudio,
-    onAudioUtterance: handleAudioUtterance,
-  });
+  actions.current = live;
 
   useEffect(() => {
-    if (!audioSupported) {
-      onToast('Microphone audio capture not supported in this browser; text chat available', 'info');
-    }
-  }, [audioSupported, onToast]);
+    sessionStorage.setItem('kinesia_join_muted', String(micMuted));
+  }, [micMuted]);
 
-  // Scroll transcripts to bottom
   useEffect(() => {
-    if (drawerOpen && transcriptScrollRef.current) {
-      transcriptScrollRef.current.scrollTop = transcriptScrollRef.current.scrollHeight;
-    }
-  }, [drawerOpen, transcripts]);
+    let cancelled = false;
+    setTranscripts([]);
+    setCaption(null);
+    completed.current = false;
+    roomService
+      .getTranscripts(room.room_code)
+      .then((history) => {
+        if (!cancelled) setTranscripts((current) => mergeTranscriptHistory(history, current, listeningLang));
+      })
+      .catch(() => {}); // Membership may still be joining; live turns remain available.
+    const timer = setInterval(() => setElapsed((value) => value + 1), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      if (speakingTimer.current) clearTimeout(speakingTimer.current);
+    };
+  }, [room.room_code, currentUser.id]);
+  useEffect(() => {
+    if (drawer) scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' });
+  }, [drawer, transcripts]);
+  useEffect(() => {
+    const unlock = () => live.unlockAudio();
+    window.addEventListener('pointerdown', unlock, { once: true });
+    window.addEventListener('keydown', unlock, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, [live.unlockAudio]);
 
-  const handleListeningLangChange = (newLang: string) => {
-    onUpdateListeningLang(newLang);
-    roomService.updateLanguages(room.room_code, { listening_lang: newLang }).catch(() => {});
+  const me: Participant = {
+    user_id: currentUser.id,
+    user_name: currentUser.display_name || currentUser.username,
+    avatar_color: currentUser.avatar_color,
+    speaking_lang: speakingLang,
+    listening_lang: listeningLang,
+    is_muted: micMuted,
   };
-
-  const handleSendText = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputText.trim()) return;
-    const text = inputText.trim();
-    setInputText('');
+  const roster = [
+    me,
+    ...participants.filter((participant) => String(participant.user_id) !== String(currentUser.id)),
+  ];
+  const duration = `${Math.floor(elapsed / 60)
+    .toString()
+    .padStart(2, '0')}:${(elapsed % 60).toString().padStart(2, '0')}`;
+  const sendText = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!text.trim() || sending) return;
+    const value = text.trim();
+    setSending(true);
     try {
       await roomService.speak(room.room_code, {
-        text,
+        text: value,
         source_lang: speakingLang,
+        utterance_id: crypto.randomUUID(),
       });
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to send text', 'error');
+      setText('');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'Message could not be translated', 'error');
+    } finally {
+      setSending(false);
     }
   };
-
-  const handleLeave = async () => {
-    setLeaving(true);
+  const confirm = async () => {
+    setBusy(true);
     try {
-      await roomService.leaveRoom(room.room_code);
-    } catch {
-      /* ignore if already disconnected */
+      if (modal === 'end') finish(await roomService.endSession(room.room_code));
+      else if (modal === 'clear') {
+        await roomService.clearTranscripts(room.room_code);
+        setTranscripts([]);
+        setCaption(null);
+      } else {
+        await roomService.leaveRoom(room.room_code).catch(() => {});
+        props.onLeaveRoom();
+      }
+      setModal(null);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'Please try again', 'error');
     } finally {
-      setLeaving(false);
-      setShowLeaveModal(false);
-      onLeaveRoom();
+      setBusy(false);
     }
   };
-
-  const handleConclude = async () => {
-    setEnding(true);
-    try {
-      const res = await roomService.endSession(room.room_code);
-      setShowEndModal(false);
-      onConcludeSession(res);
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Could not conclude session', 'error');
-    } finally {
-      setEnding(false);
-    }
-  };
-
-  const handleClearTranscripts = async () => {
-    setClearing(true);
-    try {
-      await roomService.clearTranscripts(room.room_code);
-      setTranscripts([]);
-      setActiveSubtitle(null);
-      setShowClearModal(false);
-      onToast('Logs cleared successfully', 'success');
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to clear logs', 'error');
-    } finally {
-      setClearing(false);
-    }
+  const exportTranscript = () => {
+    const body = transcripts
+      .map(
+        (turn) =>
+          `${turn.speaker_name}: ${turn.original_text}\n${turn.localized_text !== turn.original_text ? turn.localized_text : ''}`
+      )
+      .join('\n\n');
+    const url = URL.createObjectURL(new Blob([body], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `kinesia-${room.room_code}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="fixed inset-0 z-30 flex flex-col bg-canvas">
-      {/* Top bar */}
-      <header className="shrink-0 h-14 border-b border-border-subtle bg-surface-0/80 backdrop-blur-xl flex items-center justify-between px-4 sm:px-6">
-        <div className="flex items-center gap-3 min-w-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShowLeaveModal(true)}
-            leftIcon={<ArrowLeft size={16} />}
-            className="text-ink-muted hover:text-ink-primary -ml-2"
-          >
-            Leave
-          </Button>
-
-          <div className="h-4 w-px bg-border" />
-
+    <div className="fixed inset-0 z-30 flex flex-col bg-canvas text-ink-primary">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border-subtle bg-surface-0/90 px-4 py-3 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="hidden h-10 w-10 items-center justify-center rounded-xl border border-accent/25 bg-accent/10 text-accent sm:flex">
+            <Radio size={20} />
+          </div>
           <div className="min-w-0">
-            <h1 className="text-sm font-semibold text-ink-primary truncate">{room.title}</h1>
-            <div className="flex items-center gap-2 text-2xs text-ink-muted">
-              <span className="font-mono tracking-wider">{room.room_code}</span>
-              <Badge tone={connected ? 'accent' : 'warn'} dot className="scale-90 origin-left">
-                {connected ? 'Live' : 'Reconnecting'}
-              </Badge>
+            <h1 className="truncate text-sm font-semibold sm:text-base">{room.title}</h1>
+            <div className="mt-1 flex items-center gap-2 text-2xs text-ink-muted">
+              <span
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  live.connected ? 'bg-accent' : 'bg-warn animate-pulse'
+                )}
+              />
+              <span>
+                {live.connected
+                  ? 'Live translation'
+                  : live.status === 'disconnected'
+                    ? 'Disconnected'
+                    : 'Connecting'}
+              </span>
+              <span className="text-border">/</span>
+              <span className="font-mono tabular-nums">{duration}</span>
+              <span className="hidden font-mono text-ink-faint sm:inline">{room.room_code}</span>
             </div>
           </div>
         </div>
-
-        <div className="flex items-center gap-1.5">
-          <Button variant="ghost" size="icon" onClick={onCopyInvite} title="Copy invite">
-            <Share2 size={16} />
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={props.onCopyInvite} leftIcon={<Copy size={14} />}>
+            <span className="hidden sm:inline">Invite</span>
           </Button>
           <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setDrawerOpen(true)}
-            title="View Logs / Transcript"
-            className="relative"
+            variant={drawer ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setDrawer(!drawer)}
+            leftIcon={<FileText size={15} />}
           >
-            <FileText size={16} />
-            {transcripts.length > 0 && (
-              <span className="absolute top-1 right-1 h-2 w-2 rounded-full bg-accent" />
-            )}
+            <span className="hidden sm:inline">Transcript</span>
+            <span className="font-mono text-2xs">{transcripts.length}</span>
           </Button>
-          <div className="hidden sm:flex items-center gap-1.5 ml-1">
-            <Languages size={14} className="text-ink-muted" />
-            <select
-              value={listeningLang}
-              onChange={(e) => handleListeningLangChange(e.target.value)}
-              className="h-8 rounded-lg bg-surface-2 border border-border text-2xs text-ink-secondary px-2 focus:outline-none focus:border-accent/50 cursor-pointer"
-            >
-              {SUPPORTED_LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code}>
-                  Hear {l.short}
-                </option>
-              ))}
-            </select>
-          </div>
+          <Button variant="ghost" size="icon" title="Leave meeting" onClick={() => setModal('leave')}>
+            <X size={18} />
+          </Button>
         </div>
       </header>
 
-      {/* Autoplay blocked notification banner */}
-      {autoplayBlocked && (
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border-subtle bg-surface-0/40 px-4 py-2.5 sm:px-6">
+        <div className="flex flex-wrap items-center gap-3 text-xs">
+          <label className="flex items-center gap-2 text-ink-muted">
+            <Mic size={13} />
+            <span className="hidden sm:inline">I speak</span>
+            <select
+              aria-label="Speaking language"
+              value={speakingLang}
+              onChange={(event) => props.onUpdateSpeakingLang?.(event.target.value)}
+              className="max-w-[120px] rounded-lg border border-border bg-surface-1 px-2 py-1.5 text-xs text-ink-primary focus:border-accent"
+            >
+              {SUPPORTED_LANGUAGES.map((item) => (
+                <option key={item.code} value={item.code}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="text-ink-faint">→</span>
+          <label className="flex items-center gap-2 text-ink-muted">
+            <Headphones size={13} />
+            <span className="hidden sm:inline">I hear</span>
+            <select
+              aria-label="Listening language"
+              value={listeningLang}
+              onChange={(event) => {
+                live.cancelAudio();
+                setCaption(null);
+                props.onUpdateListeningLang(event.target.value);
+              }}
+              className="max-w-[120px] rounded-lg border border-border bg-surface-1 px-2 py-1.5 text-xs text-ink-primary focus:border-accent"
+            >
+              {SUPPORTED_LANGUAGES.map((item) => (
+                <option key={item.code} value={item.code}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="hidden items-center gap-4 text-2xs text-ink-muted md:flex">
+          <span className="flex items-center gap-1.5">
+            <Users size={13} />
+            {roster.length} participant{roster.length === 1 ? '' : 's'}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <ShieldCheck size={13} />
+            {room.record_session === false ? 'Not recorded' : 'Transcript saved'}
+          </span>
+        </div>
+      </div>
+
+      {live.error && (
         <div
-          onClick={unlockAndResumeAudio}
-          role="button"
-          tabIndex={0}
-          className="shrink-0 bg-accent/20 border-b border-accent/40 px-4 py-2 flex items-center justify-center gap-2 text-xs text-accent-light font-medium cursor-pointer hover:bg-accent/30 transition-all select-none animate-pulse"
+          role="alert"
+          className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-warn/20 bg-warn/10 px-4 py-3 text-xs text-warn sm:px-6"
         >
-          <span>🔊</span>
-          <span>Click anywhere to enable live audio playback (required by browser audio policy)</span>
+          <span className="max-w-3xl leading-relaxed">{live.error}</span>
+          <Button variant="ghost" size="sm" onClick={live.reconnect} leftIcon={<RefreshCw size={13} />}>
+            Reconnect audio
+          </Button>
+        </div>
+      )}
+      {live.autoplayBlocked && (
+        <div className="flex shrink-0 items-center justify-center gap-3 bg-accent/10 px-4 py-2.5 text-xs text-accent">
+          <Volume2 size={15} />
+          <span>Your browser needs permission to play translated audio.</span>
+          <Button size="sm" onClick={live.unlockAudio}>
+            Enable audio
+          </Button>
         </div>
       )}
 
-      {/* Stage */}
-      <main className="flex-1 relative overflow-hidden flex flex-col items-center justify-center p-4 sm:p-8">
-        <div
-          className={cn(
-            'w-full max-w-4xl grid gap-4 sm:gap-5',
-            participants.length <= 1 && 'max-w-md',
-            participants.length === 2 && 'grid-cols-1 sm:grid-cols-2 max-w-2xl',
-            participants.length >= 3 && 'grid-cols-2 sm:grid-cols-3'
-          )}
-        >
-          {participants.map((p) => {
-            const isMe = String(p.user_id) === String(currentUser.id);
-            const isSpeaking =
-              (speakingUserId != null && String(speakingUserId) === String(p.user_id)) ||
-              (isMe && isLocalSpeaking);
-            const isMuted = isMe ? isMicMuted : Boolean(p.is_muted);
+      <div className="relative flex min-h-0 flex-1">
+        <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+          <div className="flex flex-1 flex-col items-center justify-center gap-5 px-4 py-6 sm:px-8">
+            <div
+              className={cn(
+                'grid w-full gap-3 sm:gap-4',
+                roster.length === 1
+                  ? 'max-w-sm'
+                  : roster.length === 2
+                    ? 'max-w-2xl grid-cols-2'
+                    : 'max-w-4xl grid-cols-2 lg:grid-cols-3'
+              )}
+            >
+              {roster.map((participant) => {
+                const self = String(participant.user_id) === String(currentUser.id);
+                const active = self
+                  ? live.isSpeaking && !micMuted
+                  : String(speakingId) === String(participant.user_id);
+                const muted = self ? micMuted : participant.is_muted;
+                return (
+                  <motion.div
+                    key={participant.user_id}
+                    data-testid="participant-card"
+                    layout
+                    className={cn(
+                      'relative flex min-w-0 min-h-[190px] flex-col items-center justify-center rounded-2xl border bg-surface-1 p-5 transition-colors sm:min-h-[230px]',
+                      active ? 'border-accent/80 bg-accent/5 shadow-glow' : 'border-border'
+                    )}
+                  >
+                    <span className="absolute left-3 top-3 text-2xs text-ink-faint">
+                      {self ? 'Your microphone' : active ? 'Speaking' : 'In the room'}
+                    </span>
+                    <span
+                      className={cn(
+                        'absolute right-3 top-3',
+                        muted ? 'text-danger' : active ? 'text-accent' : 'text-ink-faint'
+                      )}
+                    >
+                      {muted ? <MicOff size={14} /> : <Mic size={14} />}
+                    </span>
+                    <div
+                      className={cn(
+                        'mb-4 flex h-16 w-16 items-center justify-center rounded-2xl text-xl font-bold text-white sm:h-20 sm:w-20',
+                        active && 'ring-4 ring-accent/15'
+                      )}
+                      style={{ backgroundColor: participant.avatar_color || '#10B981' }}
+                    >
+                      {initials(participant.user_name)}
+                    </div>
+                    <p className="max-w-full truncate text-sm font-semibold">
+                      {participant.user_name}
+                      {self && <span className="ml-1.5 text-xs font-normal text-ink-muted">(you)</span>}
+                    </p>
+                    <p className="mt-1.5 flex items-center gap-2 text-2xs text-ink-muted">
+                      <span>{langShort(participant.speaking_lang || 'en')}</span>
+                      <span className="text-ink-faint">→</span>
+                      <Headphones size={11} />
+                      <span>{langShort(participant.listening_lang || 'hi')}</span>
+                    </p>
+                    {self && (
+                      <div className="mt-3 h-1 w-20 overflow-hidden rounded-full bg-surface-3">
+                        <div
+                          className="h-full rounded-full bg-accent transition-all duration-100"
+                          style={{ width: `${micMuted ? 0 : Math.max(2, live.level * 100)}%` }}
+                        />
+                      </div>
+                    )}
+                  </motion.div>
+                );
+              })}
+            </div>
+            {roster.length === 1 && (
+              <div className="max-w-sm space-y-3 text-center">
+                <p className="text-sm text-ink-secondary">Your room is ready.</p>
+                <p className="text-xs leading-relaxed text-ink-muted">
+                  Invite someone to start a conversation. Each person chooses the language they want to hear.
+                </p>
+                <button
+                  onClick={props.onCopyInvite}
+                  className="inline-flex items-center gap-2 text-xs font-medium text-accent"
+                >
+                  <Copy size={13} />
+                  Copy invitation
+                </button>
+              </div>
+            )}
+          </div>
 
-            return (
-              <motion.div
-                key={p.user_id}
-                layout
+          <section aria-label="Live captions" className="mx-auto mb-4 w-full max-w-3xl shrink-0 px-4 sm:px-6">
+            <div className="rounded-2xl border border-border bg-surface-0/85 p-4 sm:p-5">
+              <div className="mb-3 flex items-center justify-between gap-2 text-2xs text-ink-muted">
+                <span className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'h-1.5 w-1.5 rounded-full',
+                      live.isPlayingAudio ? 'bg-accent animate-pulse' : 'bg-accent/50'
+                    )}
+                  />
+                  {caption ? `${caption.speaker_name} · ${langLabel(listeningLang)}` : 'Live captions'}
+                </span>
+                <button
+                  onClick={() => setOriginal(!original)}
+                  aria-pressed={original}
+                  className="flex items-center gap-1 text-ink-muted hover:text-ink-primary"
+                >
+                  Original {original && <Check size={11} />}
+                </button>
+              </div>
+              <p
+                role="status"
+                aria-live="polite"
                 className={cn(
-                  'relative rounded-2xl bg-surface-1 border border-border p-6 flex flex-col items-center justify-center min-h-[170px] transition-all',
-                  isSpeaking && 'border-accent shadow-glow scale-[1.02]'
+                  'min-h-[28px] text-base leading-relaxed sm:text-lg',
+                  !caption && 'text-ink-faint'
                 )}
               >
-                <div
-                  className="h-16 w-16 rounded-2xl flex items-center justify-center text-lg font-bold text-white shadow-elevation-2 mb-3 relative"
-                  style={{ backgroundColor: p.avatar_color || '#10B981' }}
-                >
-                  {initials(p.user_name)}
-                  {isSpeaking && (
-                    <span className="absolute -inset-1 rounded-2xl border-2 border-accent animate-ping-soft" />
-                  )}
-                  {isMuted && (
-                    <span
-                      title="Microphone is muted"
-                      className="absolute -bottom-1 -right-1 h-5 w-5 rounded-full bg-danger text-white flex items-center justify-center shadow-sm"
-                    >
-                      <MicOff size={11} />
-                    </span>
-                  )}
-                </div>
-                <div className="text-center min-w-0 max-w-full">
-                  <span className="text-sm font-semibold text-ink-primary block truncate">
-                    {p.user_name} {isMe && '(You)'}
-                  </span>
-                  <div className="flex items-center justify-center gap-1.5 text-2xs text-ink-muted mt-0.5">
-                    <span className="font-medium text-ink-secondary">{langShort(p.speaking_lang || 'en')}</span>
-                    <span className="text-accent font-bold">→</span>
-                    <span className="font-medium text-ink-secondary">{langShort(p.listening_lang || 'hi')}</span>
-                  </div>
-                </div>
-              </motion.div>
-            );
-          })}
-        </div>
-
-        {/* Waiting indicator when alone in room */}
-        {participants.length <= 1 && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mt-6 flex flex-col items-center gap-2 text-center"
-          >
-            <div className="flex items-center gap-2 rounded-full bg-surface-2 border border-border px-3.5 py-1.5 text-xs text-ink-muted">
-              <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
-              <span>Waiting for others to join...</span>
+                {caption?.localized_text ||
+                  caption?.original_text ||
+                  'Translations appear here as the conversation unfolds.'}
+              </p>
+              {original && caption?.original_text && caption.original_text !== caption.localized_text && (
+                <p className="mt-2 border-t border-border-subtle pt-2 text-xs leading-relaxed text-ink-muted">
+                  {caption.original_text}
+                </p>
+              )}
+              {ownCaption && (
+                <p className="mt-3 text-xs text-ink-muted">
+                  <span className="font-medium text-accent">You: </span>
+                  {ownCaption}
+                </p>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={onCopyInvite}
-              className="text-xs text-accent hover:underline flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <Copy size={13} />
-              <span>Copy invite link ({room.room_code})</span>
-            </button>
-          </motion.div>
-        )}
+          </section>
+        </main>
 
-        {/* Live Subtitle HUD */}
         <AnimatePresence>
-          {activeSubtitle && (
-            <motion.div
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              className="absolute bottom-28 left-4 right-4 sm:left-auto sm:right-auto sm:max-w-xl mx-auto z-20 pointer-events-none"
+          {drawer && (
+            <motion.aside
+              initial={{ x: 40, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 40, opacity: 0 }}
+              className="absolute inset-y-0 right-0 z-20 flex w-full flex-col border-l border-border bg-surface-1 shadow-elevation-3 sm:w-96 xl:relative xl:shrink-0"
             >
-              <div className="rounded-2xl bg-surface-0/95 backdrop-blur-xl border border-border shadow-elevation-3 p-4 space-y-1">
-                <div className="flex items-center justify-between text-2xs text-ink-muted">
-                  <span className="font-semibold text-accent">{activeSubtitle.speaker_name}</span>
-                  <span className="font-mono">{langShort(activeSubtitle.source_lang)}</span>
+              <div className="flex items-center justify-between border-b border-border px-4 py-3">
+                <div>
+                  <h2 className="text-sm font-semibold">Conversation transcript</h2>
+                  <p className="mt-1 text-2xs text-ink-muted">
+                    {room.record_session === false
+                      ? 'Visible during this session only'
+                      : 'Saved for room participants'}
+                  </p>
                 </div>
-                <p className="text-sm sm:text-base font-medium text-ink-primary leading-snug">
-                  {activeSubtitle.localized_text || activeSubtitle.original_text}
-                </p>
-                {activeSubtitle.original_text !== activeSubtitle.localized_text && (
-                  <p className="text-xs text-ink-muted italic">{activeSubtitle.original_text}</p>
+                <Button variant="ghost" size="icon" onClick={() => setDrawer(false)} title="Close transcript">
+                  <X size={17} />
+                </Button>
+              </div>
+              <div className="flex gap-2 border-b border-border-subtle px-4 py-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={exportTranscript}
+                  disabled={!transcripts.length}
+                  leftIcon={<Download size={13} />}
+                >
+                  Export
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setModal('clear')}
+                  disabled={!transcripts.length}
+                  className="text-danger"
+                  leftIcon={<Trash2 size={13} />}
+                >
+                  Clear
+                </Button>
+              </div>
+              <div ref={scroll} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+                {!transcripts.length && (
+                  <p className="py-10 text-center text-xs leading-relaxed text-ink-muted">
+                    Finalized speech will appear here.
+                    <br />
+                    Live captions may update while someone speaks.
+                  </p>
                 )}
+                {transcripts.map((turn, index) => (
+                  <div
+                    key={turn.turn_id ?? turn.id ?? index}
+                    className="rounded-xl border border-border bg-surface-0 p-3"
+                  >
+                    <div className="mb-2 flex items-center justify-between text-2xs">
+                      <span className="font-medium text-accent">{turn.speaker_name}</span>
+                      <span className="text-ink-faint">{langShort(turn.source_lang)}</span>
+                    </div>
+                    <p className="text-sm leading-relaxed">{turn.localized_text || turn.original_text}</p>
+                    {original && turn.original_text !== turn.localized_text && (
+                      <p className="mt-2 text-xs leading-relaxed text-ink-muted">{turn.original_text}</p>
+                    )}
+                    {turn.confidence != null && turn.confidence < 0.75 && (
+                      <p className="mt-2 text-2xs text-warn">
+                        Low recognition confidence — confirm important details.
+                      </p>
+                    )}
+                  </div>
+                ))}
               </div>
-            </motion.div>
-          )}
-
-          {/* Local speaker live transcription indicator */}
-          {!activeSubtitle && liveInterim && !isMicMuted && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 6 }}
-              className="absolute bottom-28 left-4 right-4 sm:left-auto sm:right-auto sm:max-w-md mx-auto z-20 pointer-events-none"
-            >
-              <div className="rounded-xl bg-surface-0/95 backdrop-blur-md border border-accent/40 shadow-elevation-2 px-3.5 py-2 flex items-center gap-2.5">
-                <span className="w-2 h-2 rounded-full bg-accent animate-ping" />
-                <p className="text-xs text-ink-primary font-medium truncate">
-                  <span className="text-accent font-semibold mr-1.5">You:</span>
-                  {liveInterim}
-                </p>
-              </div>
-            </motion.div>
+            </motion.aside>
           )}
         </AnimatePresence>
-      </main>
+      </div>
 
-      {/* Control bar */}
-      <footer className="shrink-0 safe-pb border-t border-border-subtle bg-surface-0/80 backdrop-blur-xl p-3 sm:p-4">
-        <div className="mx-auto max-w-2xl flex flex-col sm:flex-row items-center gap-3">
-          <form onSubmit={handleSendText} className="flex-1 w-full flex items-center gap-2">
+      <footer className="shrink-0 border-t border-border bg-surface-0/95 px-4 py-3 safe-pb sm:px-6">
+        <div className="mx-auto flex max-w-5xl flex-col items-center gap-3 md:flex-row md:justify-between">
+          <form onSubmit={sendText} className="flex w-full max-w-md items-center gap-2">
             <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Type message to translate & speak aloud..."
-              className="flex-1 h-10 rounded-xl bg-surface-2 border border-border px-3.5 text-sm text-ink-primary placeholder:text-ink-faint focus:outline-none focus:border-accent/60"
+              aria-label="Text message to translate"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              maxLength={2000}
+              placeholder="Or type a message…"
+              className="h-10 min-w-0 flex-1 rounded-xl border border-border bg-surface-1 px-3 text-xs focus:border-accent focus:outline-none"
             />
-            <Button type="submit" size="sm" disabled={!inputText.trim()}>
+            <Button
+              type="submit"
+              variant="secondary"
+              size="sm"
+              loading={sending}
+              disabled={!live.connected || !text.trim()}
+              title="Send and translate text (may take longer than live speech)"
+            >
               <Send size={15} />
             </Button>
           </form>
-
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-center gap-2">
             <Button
-              variant={isMicMuted ? 'danger' : isLocalSpeaking ? 'primary' : 'secondary'}
+              variant={micMuted ? 'danger' : live.isSpeaking ? 'primary' : 'secondary'}
               size="sm"
-              onClick={() => {
-                const next = !isMicMuted;
-                setIsMicMuted(next);
-                roomService.updateLanguages(room.room_code, { is_muted: next }).catch(() => {});
-              }}
-              title={isMicMuted ? 'Unmute microphone' : 'Mute microphone'}
+              onClick={() => setMicMuted(!micMuted)}
+              aria-pressed={!micMuted}
+              leftIcon={micMuted ? <MicOff size={17} /> : <Mic size={17} />}
             >
-              {isMicMuted ? <MicOff size={16} /> : <Mic size={16} />}
-              <span className="hidden sm:inline text-xs ml-1.5">
-                {isMicMuted ? 'Muted' : isLocalSpeaking ? 'Speaking...' : 'Listening'}
-              </span>
+              {micMuted ? 'Unmute' : live.isSpeaking ? 'Speaking' : 'Mic on'}
             </Button>
-
             <Button
-              variant={isAudioMuted ? 'secondary' : 'ghost'}
+              variant={audioMuted ? 'secondary' : 'ghost'}
               size="sm"
-              onClick={() => setIsAudioMuted((v) => !v)}
-              title={isAudioMuted ? 'Unmute incoming audio' : 'Mute incoming audio'}
+              onClick={() => setAudioMuted(!audioMuted)}
+              aria-pressed={!audioMuted}
+              title={audioMuted ? 'Enable translated audio' : 'Mute translated audio'}
             >
-              {isAudioMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+              {audioMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}
             </Button>
-
-            {isHost ? (
-              <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setShowLeaveModal(true)}
-                  leftIcon={<ArrowLeft size={15} />}
-                >
-                  Leave
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => setShowEndModal(true)}
-                  leftIcon={<PhoneOff size={15} />}
-                >
-                  End for All
-                </Button>
-              </>
-            ) : (
-              <Button
-                variant="danger"
-                size="sm"
-                onClick={() => setShowLeaveModal(true)}
-                leftIcon={<PhoneOff size={15} />}
-              >
-                Leave Room
-              </Button>
-            )}
+            <div className="mx-1 h-6 w-px bg-border" />
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => setModal(isHost ? 'end' : 'leave')}
+              leftIcon={<PhoneOff size={16} />}
+            >
+              {isHost ? 'End meeting' : 'Leave'}
+            </Button>
           </div>
         </div>
+        <p className="mt-2 hidden text-center text-2xs text-ink-faint sm:block">
+          Headphones help prevent echo. Your microphone stays available while translations play.
+        </p>
       </footer>
 
-      {/* Transcript / Logs Drawer */}
       <AnimatePresence>
-        {drawerOpen && (
-          <>
+        {modal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
             <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm"
-              onClick={() => setDrawerOpen(false)}
-            />
-            <motion.aside
-              initial={{ x: '100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '100%' }}
-              transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-              className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-md bg-surface-1 border-l border-border shadow-elevation-3 flex flex-col"
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="w-full max-w-sm rounded-2xl border border-border bg-surface-1 p-6 shadow-elevation-3"
             >
-              <div className="h-14 flex items-center justify-between px-5 border-b border-border">
-                <div className="flex items-center gap-2">
-                  <h2 className="text-sm font-semibold text-ink-primary">Session Logs & Transcript</h2>
-                  <Badge tone="default">{transcripts.length}</Badge>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  {transcripts.length > 0 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setShowClearModal(true)}
-                      className="text-danger hover:text-danger hover:bg-danger/10 text-xs h-8 px-2.5"
-                      leftIcon={<Trash2 size={13} />}
-                    >
-                      Clear
-                    </Button>
-                  )}
-                  <Button variant="ghost" size="icon" onClick={() => setDrawerOpen(false)}>
-                    <X size={16} />
-                  </Button>
-                </div>
-              </div>
-
-              <div ref={transcriptScrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
-                {transcripts.length === 0 ? (
-                  <div className="text-center py-16 space-y-2">
-                    <p className="text-sm text-ink-muted">No logs recorded yet.</p>
-                    <p className="text-2xs text-ink-faint">
-                      Transcripts are private and visible only to participants in this room.
-                    </p>
-                  </div>
-                ) : (
-                  transcripts.map((t, i) => (
-                    <div key={t.id ?? i} className="rounded-xl bg-surface-0 border border-border p-3 space-y-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-medium text-accent">{t.speaker_name}</span>
-                        <span className="text-2xs text-ink-faint font-mono">
-                          {langShort(t.source_lang)}
-                        </span>
-                      </div>
-                      <p className="text-sm text-ink-primary leading-snug">
-                        {t.localized_text || t.original_text}
-                      </p>
-                      {t.original_text !== t.localized_text && (
-                        <p className="text-2xs text-ink-muted italic">{t.original_text}</p>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-            </motion.aside>
-          </>
-        )}
-      </AnimatePresence>
-
-      {/* Leave Room Modal */}
-      <AnimatePresence>
-        {showLeaveModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="w-full max-w-sm rounded-2xl border border-border bg-surface-1 p-6 space-y-4 shadow-elevation-3"
-            >
-              <div className="flex items-center gap-3 text-ink-primary">
-                <div className="h-10 w-10 rounded-xl bg-surface-2 flex items-center justify-center text-accent">
-                  <ArrowLeft size={18} />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-sm">Leave Session?</h3>
-                  <p className="text-2xs text-ink-muted">You can rejoin anytime with code {room.room_code}</p>
-                </div>
-              </div>
-              <p className="text-xs text-ink-secondary leading-relaxed">
-                Leaving will disconnect your microphone and audio stream. The room remains active for other participants.
+              <h2 className="text-base font-semibold">
+                {modal === 'end'
+                  ? 'End the meeting for everyone?'
+                  : modal === 'clear'
+                    ? 'Clear the room transcript?'
+                    : 'Leave this conversation?'}
+              </h2>
+              <p className="mt-3 text-sm leading-relaxed text-ink-muted">
+                {modal === 'end'
+                  ? 'Everyone will leave the live room. Saved transcripts and session notes will be available afterward.'
+                  : modal === 'clear'
+                    ? 'This removes the saved transcript for everyone in the room. This cannot be undone.'
+                    : 'Your microphone and audio will disconnect. You can rejoin while the room is active.'}
               </p>
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <Button variant="secondary" size="sm" onClick={() => setShowLeaveModal(false)} disabled={leaving}>
-                  Stay in room
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={leaving}
-                  onClick={handleLeave}
-                >
-                  Leave room
-                </Button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* End Room Confirmation Modal (Host Only) */}
-      <AnimatePresence>
-        {showEndModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="w-full max-w-sm rounded-2xl border border-border bg-surface-1 p-6 space-y-4 shadow-elevation-3"
-            >
-              <div className="flex items-center gap-3 text-ink-primary">
-                <div className="h-10 w-10 rounded-xl bg-danger/10 flex items-center justify-center text-danger">
-                  <PhoneOff size={18} />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-sm">End Session for Everyone?</h3>
-                  <p className="text-2xs text-ink-muted">Room {room.room_code}</p>
-                </div>
-              </div>
-              <p className="text-xs text-ink-secondary leading-relaxed">
-                As host, ending the session will disconnect all participants and immediately generate an AI summary and action items.
-              </p>
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <Button variant="secondary" size="sm" onClick={() => setShowEndModal(false)} disabled={ending}>
-                  Keep Room Active
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={ending}
-                  onClick={handleConclude}
-                >
-                  End Session
-                </Button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* Clear Logs Confirmation Modal */}
-      <AnimatePresence>
-        {showClearModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="w-full max-w-sm rounded-2xl border border-border bg-surface-1 p-6 space-y-4 shadow-elevation-3"
-            >
-              <div className="flex items-center gap-3 text-ink-primary">
-                <div className="h-10 w-10 rounded-xl bg-danger/10 flex items-center justify-center text-danger">
-                  <AlertTriangle size={18} />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-sm">Clear Conversation Logs?</h3>
-                  <p className="text-2xs text-ink-muted">This will erase all turns for this room</p>
-                </div>
-              </div>
-              <p className="text-xs text-ink-secondary leading-relaxed">
-                All recorded speech transcripts for this session will be permanently cleared for everyone in this room.
-              </p>
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <Button variant="secondary" size="sm" onClick={() => setShowClearModal(false)}>
+              <div className="mt-6 flex justify-end gap-2">
+                <Button variant="secondary" size="sm" onClick={() => setModal(null)} disabled={busy}>
                   Cancel
                 </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={clearing}
-                  onClick={handleClearTranscripts}
-                >
-                  Clear logs
+                <Button variant="danger" size="sm" onClick={() => void confirm()} loading={busy}>
+                  {modal === 'end'
+                    ? 'End for everyone'
+                    : modal === 'clear'
+                      ? 'Clear transcript'
+                      : 'Leave room'}
                 </Button>
               </div>
             </motion.div>

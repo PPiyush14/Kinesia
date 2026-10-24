@@ -335,6 +335,23 @@ def get_room_transcripts(room_id: str) -> list[dict[str, Any]]:
     return result
 
 
+def save_stream_transcript(turn: dict[str, Any]) -> None:
+    """Merge language results into one stable turn ID without schema changes."""
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO transcripts
+               (id, room_id, speaker_id, speaker_name, original_text, source_lang,
+                confidence, translations_json, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                 original_text=excluded.original_text, source_lang=excluded.source_lang,
+                 confidence=excluded.confidence, translations_json=excluded.translations_json""",
+            (turn["id"], turn["room_id"], turn["speaker_id"], turn["speaker_name"],
+             turn["original_text"], turn["source_lang"], turn["confidence"],
+             json.dumps(turn["translations"], ensure_ascii=False), turn["timestamp"]),
+        )
+
+
 def save_session_insights(
     room_id: str,
     executive_summary: str,
@@ -445,7 +462,10 @@ def clear_room_transcripts(room_id: str) -> None:
 
 def delete_room(room_code_or_id: str) -> bool:
     """Permanently delete a room, its participants, transcripts, and insights."""
-    room = get_room(room_code_or_id)
+    room = get_room_by_code(room_code_or_id)
+    if room is None:
+        with get_db() as db:
+            room = db.fetchone("SELECT id FROM rooms WHERE id = ?", (room_code_or_id,))
     if not room:
         return False
     room_id = room["id"]

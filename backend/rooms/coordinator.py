@@ -12,7 +12,10 @@ import logging
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
+from functools import wraps
 from typing import Any
 
 from backend.config import AppConfig, ChannelConfig
@@ -27,11 +30,13 @@ from backend.db.rooms import (
     get_session_insights,
     remove_participant,
     save_session_insights,
+    save_stream_transcript,
     update_participant_languages,
 )
 from backend.gemma_client import GemmaClient
 from backend.nlp.entity_extractor import EntityExtractor
 from backend.nlp.summarizer import ConversationSummarizer
+from backend.nlp.extractive_summary import ExtractiveSummarizer
 from backend.tts_client import TtsClient
 
 logger = logging.getLogger(__name__)
@@ -56,8 +61,43 @@ class RoomSession:
     title: str
     record_session: bool
     participants: dict[str, ParticipantSession] = field(default_factory=dict)
-    recent_utterances: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
+    turn_lock: Any = field(default_factory=threading.RLock, repr=False)
+    processed_utterances: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    ending: bool = False
     created_at: float = field(default_factory=time.time)
+    stream_turns: dict[str, dict[str, Any]] = field(default_factory=dict)
+    host_id: str = ""
+
+
+def _ordered_utterance(method):
+    """Serialize turns within a room and deduplicate request IDs, never spoken text.
+
+    Provider calls do not hold the coordinator's global membership lock, so other
+    rooms and SSE reconnects continue independently. The lock is reentrant because
+    audio transcription delegates to the text pipeline.
+    """
+    @wraps(method)
+    def process(self, room_code, speaker_id, *args, **kwargs):
+        room = self.get_or_load_room(room_code)
+        if not room:
+            raise ValueError("Room does not exist or has ended.")
+        self.ensure_room_access(room_code, speaker_id)
+        utterance_id = kwargs.get("utterance_id")
+        if utterance_id is not None and (not isinstance(utterance_id, str) or not 1 <= len(utterance_id) <= 128):
+            raise ValueError("utterance_id must be a non-empty string of at most 128 characters.")
+        key = (speaker_id, utterance_id) if utterance_id else None
+        with room.turn_lock:
+            if room.ending:
+                raise ValueError("Room has ended.")
+            if key and key in room.processed_utterances:
+                return room.processed_utterances[key]
+            result = method(self, room_code, speaker_id, *args, **kwargs)
+            if key:
+                room.processed_utterances[key] = result
+                if len(room.processed_utterances) > 1000:
+                    del room.processed_utterances[next(iter(room.processed_utterances))]
+            return result
+    return process
 
 
 class RoomCoordinator:
@@ -67,10 +107,11 @@ class RoomCoordinator:
         self.config = config
         self._lock = threading.RLock()
         self.active_rooms: dict[str, RoomSession] = {}
+        self._removed_room_codes: dict[str, None] = {}
 
         # AI Engines
         self.gemma = GemmaClient(config)
-        self.summarizer = ConversationSummarizer(self.gemma)
+        self.summarizer = ExtractiveSummarizer() if config.translation_provider == "soniox" else ConversationSummarizer(self.gemma)
         try:
             self.entity_extractor = EntityExtractor()
         except Exception as exc:
@@ -83,7 +124,7 @@ class RoomCoordinator:
         self.soniox = SonioxClient(config)
         try:
             from backend.groq_whisper_client import GroqWhisperClient
-            self.whisper_fallback = GroqWhisperClient(config)
+            self.whisper_fallback = GroqWhisperClient(config) if config.translation_provider != "soniox" else None
         except Exception:
             self.whisper_fallback = None
 
@@ -91,8 +132,11 @@ class RoomCoordinator:
         """Fetch active room in memory or load from database."""
         clean_code = room_code.strip().lower()
         with self._lock:
+            if clean_code in self._removed_room_codes:
+                return None
             if clean_code in self.active_rooms:
-                return self.active_rooms[clean_code]
+                room = self.active_rooms[clean_code]
+                return None if room.ending else room
 
             room_data = get_room_by_code(clean_code)
             if not room_data or not room_data.get("is_active"):
@@ -103,9 +147,19 @@ class RoomCoordinator:
                 room_id=room_data["id"],
                 title=room_data["title"],
                 record_session=room_data["record_session"],
+                host_id=room_data["host_id"],
             )
             self.active_rooms[clean_code] = room
             return room
+
+    @staticmethod
+    def ensure_room_access(room_code: str, user_id: str) -> None:
+        """A passcode check must grant membership before any private-room IO."""
+        record = get_room_by_code(room_code)
+        if not record:
+            raise ValueError("Room not found.")
+        if record.get("has_passcode") and not is_room_member(record["id"], user_id):
+            raise ValueError("Passcode verification required for this room.")
 
     def join_room(
         self,
@@ -120,12 +174,16 @@ class RoomCoordinator:
             raise ValueError(f"Room '{room_code}' does not exist or has ended.")
 
         user_id = user_profile["id"]
+        self.ensure_room_access(room_code, user_id)
         user_name = user_profile.get("display_name") or user_profile.get("username", "Guest")
         avatar_color = user_profile.get("avatar_color", "#10B981")
 
         user_gender = user_profile.get("gender") or "female"
 
         with self._lock:
+            if room.ending:
+                raise ValueError("Room has ended.")
+            previous = room.participants.get(user_id)
             participant = ParticipantSession(
                 user_id=user_id,
                 user_name=user_name,
@@ -133,17 +191,29 @@ class RoomCoordinator:
                 speaking_lang=speaking_lang,
                 listening_lang=listening_lang,
                 gender=user_gender,
+                is_muted=previous.is_muted if previous else False,
             )
+            if previous:
+                # The latest REST language/mute settings survive a transport reconnect.
+                participant.speaking_lang = previous.speaking_lang
+                participant.listening_lang = previous.listening_lang
+                # Move unsent events; the old connection retains its own empty queue.
+                while True:
+                    try:
+                        participant.event_queue.put_nowait(previous.event_queue.get_nowait())
+                    except queue.Empty:
+                        break
             room.participants[user_id] = participant
 
             # Persist to DB
-            add_participant(
-                room.room_id,
-                user_id,
-                user_name,
-                speaking_lang=speaking_lang,
-                listening_lang=listening_lang,
-            )
+            if not previous:
+                add_participant(
+                    room.room_id,
+                    user_id,
+                    user_name,
+                    speaking_lang=speaking_lang,
+                    listening_lang=listening_lang,
+                )
 
             # Broadcast full updated participant list to all room members
             participants_list = [
@@ -165,20 +235,21 @@ class RoomCoordinator:
             "participants",
             participants_list,
         )
-        self.broadcast_event(
-            room_code,
-            "participant_joined",
-            {
-                "user_id": user_id,
-                "user_name": user_name,
-                "avatar_color": avatar_color,
-                "speaking_lang": speaking_lang,
-                "listening_lang": listening_lang,
-                "is_muted": False,
-                "participant_count": part_count,
-            },
-            exclude_user_id=user_id,
-        )
+        if not previous:
+            self.broadcast_event(
+                room_code,
+                "participant_joined",
+                {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "avatar_color": avatar_color,
+                    "speaking_lang": speaking_lang,
+                    "listening_lang": listening_lang,
+                    "is_muted": False,
+                    "participant_count": part_count,
+                },
+                exclude_user_id=user_id,
+            )
 
         return room, participant.event_queue
 
@@ -226,13 +297,15 @@ class RoomCoordinator:
         self.broadcast_event(clean_code, "participants", participants_list)
         return participants_list
 
-    def leave_room(self, room_code: str, user_id: str) -> None:
+    def leave_room(self, room_code: str, user_id: str, event_queue: queue.Queue | None = None) -> None:
         """Handle participant leaving the room."""
         clean_code = room_code.strip().lower()
         with self._lock:
             room = self.active_rooms.get(clean_code)
             if not room or user_id not in room.participants:
                 return
+            if event_queue is not None and room.participants[user_id].event_queue is not event_queue:
+                return  # A superseded SSE handler must not remove the new connection.
 
             leaving = room.participants.pop(user_id)
             remove_participant(room.room_id, user_id)
@@ -279,10 +352,18 @@ class RoomCoordinator:
             if not room:
                 return
 
-            dead_users = []
             for uid, participant in room.participants.items():
                 if exclude_user_id and uid == exclude_user_id:
                     continue
+                if event_type == "session_concluded":
+                    # Session termination must not sit behind (or be dropped by)
+                    # a slow participant's queued audio. Keep both terminal event
+                    # names for existing clients; only the first clears backlog.
+                    while True:
+                        try:
+                            participant.event_queue.get_nowait()
+                        except queue.Empty:
+                            break
                 try:
                     participant.event_queue.put_nowait({"type": event_type, "data": payload})
                 except queue.Full:
@@ -322,9 +403,15 @@ class RoomCoordinator:
         except Exception:
             pass
 
-        # 3. Default fallback as 16kHz mono PCM
-        return audio_bytes, 16000, 1
+        # Only explicitly raw audio may be treated as PCM. Compressed container
+        # bytes mislabeled as PCM produce meaningless Soniox transcripts.
+        if mime_type.split(";", 1)[0].strip().lower() in {"", "audio/pcm", "audio/x-pcm"}:
+            if len(audio_bytes) % 2:
+                raise ValueError("16-bit PCM audio must contain complete samples.")
+            return audio_bytes, 16000, 1
+        raise ValueError("Unable to decode audio; upload a 16-bit PCM WAV file.")
 
+    @_ordered_utterance
     def process_audio_utterance(
         self,
         room_code: str,
@@ -333,17 +420,26 @@ class RoomCoordinator:
         audio_bytes: bytes,
         source_lang: str,
         mime_type: str = "audio/wav",
+        utterance_id: str | None = None,
     ) -> dict[str, Any]:
         """Transcribe speech audio via Soniox STT and fan out translations."""
         if not audio_bytes:
             return {}
+        if self.config.translation_provider == "soniox":
+            pcm, rate, channels = self._extract_pcm16le(audio_bytes, mime_type)
+            result = self.soniox.transcribe_pcm16(pcm, session_language_hint=source_lang, sample_rate=rate, channels=channels)
+            if not result.transcript:
+                return {}
+            return self.process_utterance(room_code, speaker_id, speaker_name, result.transcript,
+                                          result.detected_language or source_lang, confidence=result.confidence,
+                                          native_audio=(pcm, rate, channels))
 
-        pcm_bytes, sample_rate, channels = self._extract_pcm16le(audio_bytes, mime_type)
         transcribed_text = ""
         detected_lang = source_lang
         confidence = 1.0
 
         try:
+            pcm_bytes, sample_rate, channels = self._extract_pcm16le(audio_bytes, mime_type)
             res = self.soniox.transcribe_pcm16(
                 pcm_bytes,
                 session_language_hint=source_lang,
@@ -354,11 +450,11 @@ class RoomCoordinator:
             if res.detected_language:
                 detected_lang = res.detected_language
             confidence = res.confidence
-            logger.info(
-                "Soniox STT output: '%s' (lang=%s, conf=%.2f)",
-                transcribed_text,
+            logger.debug(
+                "Soniox STT completed (lang=%s, conf=%.2f, chars=%d)",
                 detected_lang,
                 confidence,
+                len(transcribed_text),
             )
         except Exception as exc:
             logger.error("Soniox STT transcription failed: %s", exc)
@@ -385,6 +481,7 @@ class RoomCoordinator:
             confidence=confidence,
         )
 
+    @_ordered_utterance
     def process_utterance(
         self,
         room_code: str,
@@ -393,6 +490,8 @@ class RoomCoordinator:
         text: str,
         source_lang: str,
         confidence: float = 1.0,
+        utterance_id: str | None = None,
+        native_audio: tuple[bytes, int, int] | None = None,
     ) -> dict[str, Any]:
         """Process an utterance and perform fan-out translation for all listeners.
 
@@ -410,48 +509,7 @@ class RoomCoordinator:
         if not clean_text:
             return {}
 
-        # 1. Clean immediate consecutive repeated words ("hello hello" -> "hello", "the the" -> "the")
-        words = clean_text.split()
-        deduped_words: list[str] = []
-        for i, w in enumerate(words):
-            if i == 0 or w.lower() != words[i - 1].lower():
-                deduped_words.append(w)
-        clean_text = " ".join(deduped_words).strip()
-        if not clean_text:
-            return {}
-
         now = time.time()
-
-        # 2. Check speaker's recent utterance cache to eliminate 1+1, stutter echoes, and duplicate prefixes
-        norm_incoming = clean_text.lower().strip()
-        with self._lock:
-            speaker_history = room.recent_utterances.setdefault(speaker_id, [])
-            # Prune entries older than 5.0 seconds
-            room.recent_utterances[speaker_id] = [(txt, t) for (txt, t) in speaker_history if now - t < 5.0]
-            speaker_history = room.recent_utterances[speaker_id]
-
-            for prev_txt, prev_t in speaker_history:
-                prev_norm = prev_txt.lower().strip()
-                # Exact duplicate within 4 seconds
-                if prev_norm == norm_incoming:
-                    logger.debug("Dropping exact duplicate utterance from %s: %s", speaker_id, clean_text)
-                    return {}
-                # Fully contained substring of recently emitted longer sentence
-                if len(norm_incoming) >= 3 and norm_incoming in prev_norm and (now - prev_t) < 3.0:
-                    logger.debug("Dropping substring duplicate from %s: %s", speaker_id, clean_text)
-                    return {}
-                # Previous recent utterance was a prefix of incoming (e.g. "hello" -> "hello how are you")
-                if len(prev_norm) >= 3 and norm_incoming.startswith(prev_norm) and (now - prev_t) < 3.0:
-                    delta = clean_text[len(prev_txt):].strip(" ,.-!?।")
-                    if delta and len(delta) >= 2:
-                        logger.info("Stripped duplicate prefix '%s' -> processing new delta '%s'", prev_txt, delta)
-                        clean_text = delta
-                        norm_incoming = clean_text.lower().strip()
-                    else:
-                        logger.debug("Dropping fully redundant prefix expansion from %s", speaker_id)
-                        return {}
-
-            speaker_history.append((clean_text, now))
 
         # Emit speaking event
         self.broadcast_event(
@@ -480,6 +538,11 @@ class RoomCoordinator:
                 for p in room.participants.values()
                 if p.listening_lang
             }
+            audio_langs = {
+                p.listening_lang for uid, p in room.participants.items()
+                if uid != speaker_id and p.listening_lang
+            }
+            speaker_gender = room.participants[speaker_id].gender
 
         # Create dummy channel configurations for translation prompts
         speaker_ch = ChannelConfig(key="speaker", name=speaker_name, source_language=source_lang, language_mode="fixed")
@@ -489,8 +552,16 @@ class RoomCoordinator:
 
         # Detect if incoming text is primarily Latin characters
         has_latin_chars = any('a' <= ch.lower() <= 'z' for ch in clean_text)
+        if self.config.translation_provider == "soniox" and native_audio is None and any(language != source_lang for language in target_langs):
+            # Soniox translates speech, not standalone text. Preserve the text
+            # fallback using a voice bridge rather than introducing another LLM.
+            source_channel = replace(next(iter(self.config.channels.values())), source_language=source_lang)
+            source_audio = self.tts.synthesize_for_language(clean_text, source_channel, source_lang, gender=speaker_gender)
+            if not source_audio:
+                raise ValueError("The text-to-speech bridge is unavailable; please use your microphone.")
+            native_audio = self._extract_pcm16le(source_audio, "audio/wav")
 
-        for target_lang in target_langs:
+        def localize(target_lang: str) -> None:
             # If target language uses non-Latin script (Hindi, Marathi, etc.) but the text is Latin/English,
             # or if target language is different from claimed source language, we MUST translate.
             is_non_latin_target = target_lang in {"hi", "mr", "bn", "ta", "te", "gu", "kn", "ml", "pa", "ar", "ru", "ja", "ko", "zh"}
@@ -501,42 +572,31 @@ class RoomCoordinator:
             else:
                 listener_ch = ChannelConfig(key="listener", name="Listener", source_language=target_lang, language_mode="fixed")
                 try:
-                    translated = self.gemma.translate(
-                        clean_text,
-                        speaker_ch,
-                        listener_ch,
-                        source_lang,
-                        target_lang,
-                        source_lang,
-                    )
-                    translations[target_lang] = translated.strip() if translated else clean_text
+                    if self.config.translation_provider == "soniox":
+                        if native_audio is None:
+                            translated = clean_text
+                        else:
+                            pcm, rate, channels = native_audio
+                            result = self.soniox.transcribe_pcm16(pcm, session_language_hint=source_lang,
+                                                                 sample_rate=rate, channels=channels, target_language=target_lang)
+                            translated = result.translation
+                            if not translated:
+                                raise ValueError("Soniox returned no translation for this language.")
+                    else:
+                        translated = self.gemma.translate(clean_text, speaker_ch, listener_ch, source_lang, target_lang, source_lang)
+                    translations[target_lang] = translated.strip() if translated else ""
                 except Exception as exc:
                     logger.warning("Translation to %s failed: %s", target_lang, exc)
-                    translations[target_lang] = clean_text
+                    translations[target_lang] = ""
 
-            # Synthesize speech for this language matching the speaker's gender
-            speaker_gender = "female"
-            with self._lock:
-                spk_p = room.participants.get(speaker_id)
-                if spk_p and getattr(spk_p, "gender", None):
-                    speaker_gender = spk_p.gender
-                else:
-                    try:
-                        from backend.db.auth import get_user_profile
-                        u = get_user_profile(speaker_id)
-                        if u and u.get("gender"):
-                            speaker_gender = u["gender"]
-                    except Exception:
-                        pass
+            # The speaker receives subtitles but never hears their own TTS.
+            if target_lang not in audio_langs or not translations[target_lang]:
+                return
 
             try:
-                synth_ch = ChannelConfig(
-                    key="synth",
-                    name="Synthesizer",
-                    source_language=target_lang,
-                    language_mode="fixed",
-                    cartesia_voice_id=self.config.channels.get("1", speaker_ch).cartesia_voice_id,
-                )
+                configured_channel = next(iter(self.config.channels.values()), speaker_ch)
+                synth_ch = replace(configured_channel, key="synth", name="Synthesizer", source_language=target_lang,
+                                   cartesia_voice_id=self.config.cartesia_voice_map.get(target_lang, configured_channel.cartesia_voice_id))
                 wav_bytes = self.tts.synthesize_for_language(
                     translations[target_lang],
                     synth_ch,
@@ -549,6 +609,12 @@ class RoomCoordinator:
                     audio_payloads[target_lang] = f"data:{mime};base64,{b64_audio}"
             except Exception as exc:
                 logger.debug("TTS synthesis failed for lang %s: %s", target_lang, exc)
+
+        # Bound concurrent provider work; latency is no longer the sum of every
+        # listener language's translation and synthesis time.
+        if target_langs:
+            with ThreadPoolExecutor(max_workers=min(4, len(target_langs))) as pool:
+                list(pool.map(localize, target_langs))
 
         # Extract entities if enabled
         entities: dict[str, list[str]] = {}
@@ -572,6 +638,7 @@ class RoomCoordinator:
             )
 
         # Broadcast customized turn payload to every room participant
+        turn_id = turn_record.get("id") or str(uuid.uuid4())
         with self._lock:
             for uid, participant in room.participants.items():
                 p_lang = participant.listening_lang
@@ -579,7 +646,7 @@ class RoomCoordinator:
                 localized_audio = audio_payloads.get(p_lang)
 
                 turn_event = {
-                    "turn_id": turn_record.get("id") or f"turn_{int(now * 1000)}",
+                    "turn_id": turn_id,
                     "speaker_id": speaker_id,
                     "speaker_name": speaker_name,
                     "source_lang": source_lang,
@@ -598,12 +665,94 @@ class RoomCoordinator:
 
         return turn_record
 
+    def record_stream_segment(self, room_code, speaker_id, speaker_name, segment):
+        room = self.get_or_load_room(room_code)
+        if not room:
+            return
+        with room.turn_lock:
+            if room.ending:
+                return
+            # Align results from parallel language streams by source-audio time,
+            # never by repeated words. Repeated utterances remain distinct.
+            match = None
+            if segment.end_ms > segment.start_ms:
+                for previous in reversed(list(room.stream_turns.values())[-20:]):
+                    if previous["speaker_id"] != speaker_id:
+                        continue
+                    overlap = min(previous["_end"], segment.end_ms) - max(previous["_start"], segment.start_ms)
+                    duration = min(previous["_end"] - previous["_start"], segment.end_ms - segment.start_ms)
+                    if duration > 0 and overlap / duration > 0.65 and abs(previous["_start"] - segment.start_ms) < 500:
+                        match = previous
+                        break
+            if match is None:
+                identifier = str(uuid.uuid4())
+                match = {"id": identifier, "room_id": room.room_id, "speaker_id": speaker_id,
+                         "speaker_name": speaker_name, "original_text": segment.original,
+                         "source_lang": segment.source_lang, "confidence": segment.confidence,
+                         "translations": {}, "timestamp": time.time(), "revision": 0,
+                         "_start": segment.start_ms, "_end": segment.end_ms}
+                room.stream_turns[identifier] = match
+                if len(room.stream_turns) > 200:
+                    del room.stream_turns[next(iter(room.stream_turns))]
+            if segment.target_lang in match["translations"] and match["translations"][segment.target_lang] == segment.translated:
+                return
+            match["translations"][segment.source_lang] = segment.original
+            if segment.translated:
+                match["translations"][segment.target_lang] = segment.translated
+            match["revision"] += 1
+            if room.record_session:
+                save_stream_transcript(match)
+            with self._lock:
+                for uid, participant in room.participants.items():
+                    language = participant.listening_lang
+                    if uid != speaker_id and language not in match["translations"]:
+                        continue
+                    event = {key: value for key, value in match.items() if not key.startswith("_")}
+                    event["translations"] = dict(match["translations"])
+                    event.update(turn_id=match["id"], listening_lang=language,
+                                 localized_text=match["translations"].get(language, match["original_text"]),
+                                 audio_data_url=None)
+                    try:
+                        participant.event_queue.put_nowait({"type": "turn", "data": event})
+                    except queue.Full:
+                        logger.debug("Slow transcript listener in room %s", room_code)
+
+    def remove_cached_room(self, room_code: str) -> None:
+        """Stop active streams before a caller removes the room's database rows."""
+        clean_code = room_code.strip().lower()
+        with self._lock:
+            room = self.active_rooms.get(clean_code)
+        if room is None:
+            return
+        with room.turn_lock:
+            room.ending = True
+            self.broadcast_event(clean_code, "session_ended", {
+                "executive_summary": "The room was removed by its host.",
+                "key_points": [], "action_items": [], "summary_method": "extractive",
+            })
+            with self._lock:
+                # Block reloads in the short interval before the caller commits
+                # the database deletion. Persisted deletion handles restarts.
+                self._removed_room_codes[clean_code] = None
+                if len(self._removed_room_codes) > 1000:
+                    del self._removed_room_codes[next(iter(self._removed_room_codes))]
+                if self.active_rooms.get(clean_code) is room:
+                    del self.active_rooms[clean_code]
+
+    def remove_hosted_cached_rooms(self, user_id: str) -> None:
+        with self._lock:
+            codes = [code for code, room in self.active_rooms.items() if str(room.host_id) == str(user_id)]
+        for code in codes:
+            self.remove_cached_room(code)
+
     def clear_transcripts(self, room_code: str, user_id: str, user_name: str = '') -> None:
         clean_code = room_code.strip().lower()
         room = self.get_or_load_room(clean_code)
         if not room:
             raise ValueError('Room not found.')
-        clear_room_transcripts(room.room_id)
+        with room.turn_lock:
+            clear_room_transcripts(room.room_id)
+            room.stream_turns.clear()
         self.broadcast_event(
             clean_code,
             'transcripts_cleared',
@@ -616,6 +765,18 @@ class RoomCoordinator:
         room = self.get_or_load_room(clean_code)
         if not room:
             raise ValueError(f"Room '{clean_code}' not found.")
+
+        with self._lock:
+            if room.ending:
+                raise ValueError("Room is already ending.")
+            room.ending = True
+        # Wait for the current turn's commit before taking the summary snapshot.
+        # New turns and joins are rejected as soon as ending is set.
+        with room.turn_lock:
+            return self._conclude_session(room)
+
+    def _conclude_session(self, room: RoomSession) -> dict[str, Any]:
+        clean_code = room.room_code
 
         # Conclude in database
         end_room(clean_code)
@@ -683,6 +844,7 @@ class RoomCoordinator:
                 entities=all_entities,
             )
 
+        insights_data["summary_method"] = "extractive" if self.config.translation_provider == "soniox" else "llm"
         # Notify participants that session concluded
         self.broadcast_event(clean_code, "session_concluded", insights_data)
         self.broadcast_event(clean_code, "session_ended", insights_data)

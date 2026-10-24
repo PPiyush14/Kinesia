@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from backend.db.auth import authenticate_user, create_token, register_user, verify_token
+from backend.db.auth import _get_signing_key
 from backend.db.connection import get_db, init_db
 from backend.db.rooms import (
     add_participant,
@@ -65,6 +66,19 @@ def test_user_registration_and_authentication() -> None:
     # 5. Reject invalid password
     with pytest.raises(ValueError, match="Invalid email/username or password"):
         authenticate_user("piyush", "wrongPassword")
+
+
+def test_missing_or_empty_jwt_secret_uses_random_process_key(monkeypatch):
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    key = _get_signing_key()
+    assert len(key) >= 32
+    token = create_token("user", "user", "user@example.com")
+    assert verify_token(token)["sub"] == "user"
+    monkeypatch.setenv("JWT_SECRET", "  ")
+    assert _get_signing_key() == key
+    monkeypatch.setenv("JWT_SECRET", "configured-test-signing-key-32-characters")
+    assert _get_signing_key() != key
+    assert verify_token(token) is None
 
 
 def test_room_lifecycle_and_access_control() -> None:

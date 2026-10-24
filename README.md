@@ -9,7 +9,9 @@ app_port: 7860
 
 # Kinesia
 
-Real-time multilingual dialogue platform. Participants speak in their native language; others receive translated subtitles and synthesized speech with sub-second latency. Sessions conclude with autonomous conversation intelligence summaries, key points, and action items.
+Multilingual audio meetings with streamed Soniox transcription/translation, Cartesia speech, live captions, and participant-only transcript history. Session notes quote recorded discussion and possible commitments without an additional LLM. Latency and recognition quality depend on the language pair, network, and provider load; no sub-second guarantee is claimed.
+
+For the current two-service Render deployment, follow [Render deployment and test checklist](docs/RENDER_DEPLOYMENT.md). Do not upload `.env` to GitHub. The earlier audit is recorded in [KINESIA_AUDIT_FIXES.md](docs/KINESIA_AUDIT_FIXES.md).
 
 ## Repository layout
 
@@ -35,20 +37,20 @@ kinesia/
 
 | Layer | Technology |
 |-------|------------|
-| Frontend | React 18, TypeScript, Vite 5, Tailwind CSS, Framer Motion, Lucide |
-| Backend | Python 3.10+, ThreadingHTTPServer |
-| Realtime | Server-Sent Events (`text/event-stream`) |
+| Frontend | React 18, TypeScript, Vite 7, Tailwind CSS, Framer Motion, Lucide |
+| Backend | Python 3.10+, FastAPI/Uvicorn; existing REST implementation on a loopback adapter |
+| Realtime | Authenticated WebSocket, binary PCM, AudioWorklet microphone capture; legacy SSE retained |
 | STT | Soniox Real-Time WebSocket |
-| Translation | Google Gemma (OpenAI-compatible API) |
-| TTS | Cartesia WebSocket (+ Google TTS fallback) |
-| NLP | BIAggregator, EntityExtractor, Summarizer |
+| Translation | Soniox native speech translation |
+| TTS | Cartesia streaming WebSocket; no hidden third-provider fallback in meeting mode |
+| NLP | Extractive session notes; optional spaCy entity extraction when its model is installed |
 | DB | SQLite (default) / PostgreSQL |
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 20.19+ (or a supported newer LTS)
 - Python 3.10+
-- API keys for Soniox, Cartesia, and the LLM provider (see `.env.example`)
+- API keys for Soniox and Cartesia (see `.env.example`)
 
 ## Setup
 
@@ -68,11 +70,11 @@ cd frontend && npm install && cd ..
 
 ## Development
 
-Terminal 1 — API + SSE server (default `http://127.0.0.1:8765`):
+Terminal 1 — API + streaming audio server (default `http://127.0.0.1:8765`):
 
 ```bash
 source .venv/bin/activate
-python run_kinesia.py
+python -m backend.dashboard_server
 # or: npm run server
 ```
 
@@ -89,15 +91,17 @@ npm run dev
 npm run build
 # Frontend bundles into backend/web/
 # Serve with the same Python process (static + API)
-python run_kinesia.py
+python -m backend.dashboard_server
 ```
 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt
+pip install pytest pytest-cov
 npm run test
 # or: python -m pytest tests/ -q
+npm --prefix frontend test
+npm --prefix frontend run test:e2e
 ```
 
 ## API overview
@@ -115,6 +119,7 @@ npm run test
 | GET | `/api/v1/rooms/:code/transcripts` | Transcript history |
 | GET | `/api/v1/rooms/:code/insights` | MoM payload |
 | SSE | `/events/rooms/:code` | Live events |
+| WebSocket | `/ws/rooms/:code` | Authenticated live microphone, captions, PCM audio and room events |
 
 Auth: `Authorization: Bearer <token>`.
 

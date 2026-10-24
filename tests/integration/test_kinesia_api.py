@@ -134,6 +134,38 @@ def test_kinesia_auth_and_room_flow(kinesia_server) -> None:
         assert "Deploy frontend to Vercel" in end_resp["data"]["action_items"]
 
     # 8. Query Saved Insights (GET /api/v1/rooms/{code}/insights)
-    insights_resp = api_get(f"{base_url}/api/v1/rooms/{room_code}/insights")
+    insights_resp = api_get(f"{base_url}/api/v1/rooms/{room_code}/insights", token=token)
     assert insights_resp["ok"] is True
     assert insights_resp["data"]["executive_summary"] == "Discussion on global scaling."
+
+
+def test_private_room_requires_server_side_passcode_grant(kinesia_server):
+    base, state = kinesia_server
+    def user(name):
+        api_post(f"{base}/api/v1/auth/register", {"username": name, "email": f"{name}@example.com", "password": "pass123"})
+        return api_post(f"{base}/api/v1/auth/login", {"login": name, "password": "pass123"})["data"]
+    host, guest = user("host"), user("guest")
+    room = api_post(f"{base}/api/v1/rooms", {"title": "Private", "passcode": "room-secret"}, host["token"])["data"]
+    url = f"{base}/api/v1/rooms/{room['room_code']}"
+    for endpoint, status in [("insights", 403), ("transcripts", 403), ("participants", 403)]:
+        with pytest.raises(HTTPError) as denied:
+            api_get(f"{url}/{endpoint}", guest["token"])
+        assert denied.value.code == status
+    with pytest.raises(HTTPError) as denied:
+        api_get(f"{url}/insights")
+    assert denied.value.code == 401
+    with pytest.raises(HTTPError):
+        api_get(f"{base}/events/rooms/{room['room_code']}?token={guest['token']}")
+    with patch.object(state.coordinator.soniox, "transcribe_pcm16") as stt:
+        with pytest.raises(HTTPError):
+            api_post(f"{url}/speak-audio", {"audio_base64": "AAAA", "source_lang": "en"}, guest["token"])
+        stt.assert_not_called()
+    assert api_post(f"{url}/verify", {"passcode": "wrong"}, guest["token"])["data"]["valid"] is False
+    assert api_post(f"{url}/verify", {"passcode": "room-secret"}, guest["token"])["data"]["valid"] is True
+    assert api_get(f"{url}/insights", guest["token"])["ok"]
+    assert api_get(f"{url}/participants", guest["token"])["ok"]
+    with patch.object(state.coordinator.tts, "synthesize_for_language", return_value=b""), \
+         patch.object(state.coordinator.gemma, "translate", return_value="Hello"):
+        first = api_post(f"{url}/speak", {"text": "Hello", "source_lang": "en", "utterance_id": "http-retry"}, guest["token"])
+        second = api_post(f"{url}/speak", {"text": "Hello", "source_lang": "en", "utterance_id": "http-retry"}, guest["token"])
+    assert first["data"]["id"] == second["data"]["id"]

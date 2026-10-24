@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from backend.config import AppConfig, ChannelConfig
+from backend.config import load_config
 
 
 def test_channel_resolution(sample_config: AppConfig) -> None:
@@ -73,3 +74,40 @@ def test_missing_runtime_values_checks(sample_config: AppConfig) -> None:
     missing = dummy.missing_runtime_values()
     assert "SONIOX_API_KEY" in missing
     assert "CARTESIA_API_KEY" in missing
+
+
+def speech_config(monkeypatch, tmp_path):
+    monkeypatch.setattr("backend.config.project_root", lambda: tmp_path)
+    for name in list(os.environ):
+        if name.startswith(("SONIOX_", "CARTESIA_", "GEMMA_", "TTS_", "TRANSLATION_", "CHANNEL_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("SONIOX_API_KEY", "mock-soniox")
+    monkeypatch.setenv("CARTESIA_API_KEY", "mock-cartesia")
+
+
+def test_web_configuration_defaults_to_two_provider_mode(monkeypatch, tmp_path):
+    speech_config(monkeypatch, tmp_path)
+    config = load_config()
+    assert config.translation_provider == "soniox"
+    assert config.tts_provider == "cartesia"
+    assert config.cartesia_emotions == []
+    assert config.cartesia_request_timeout_seconds == 15
+    assert config.channels["1"].cartesia_voice_id
+    assert config.channels["1"].cartesia_model_id == "sonic-3.6-2026-08-27"
+    assert config.missing_runtime_values() == []
+
+
+def test_soniox_mode_cannot_silently_select_another_tts_provider(monkeypatch, tmp_path):
+    speech_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("TTS_PROVIDER", "google")
+    with pytest.raises(ValueError, match="requires TTS_PROVIDER=cartesia"):
+        load_config()
+
+
+def test_language_voice_map_is_validated(monkeypatch, tmp_path):
+    speech_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("CARTESIA_VOICE_MAP", '{"hi":"test-voice"}')
+    assert load_config().cartesia_voice_map == {"hi": "test-voice"}
+    monkeypatch.setenv("CARTESIA_VOICE_MAP", '["not-a-mapping"]')
+    with pytest.raises(ValueError, match="map language"):
+        load_config()

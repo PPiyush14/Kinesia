@@ -43,18 +43,23 @@ export interface Participant {
 
 export interface TranscriptTurn {
   id?: string | number;
+  turn_id?: string | number;
+  revision?: number;
+  confidence?: number;
   speaker_id?: number | string;
   speaker_name: string;
   source_lang: string;
   listening_lang?: string;
   original_text: string;
   localized_text: string;
+  translations?: Record<string, string>;
   audio_data_url?: string;
   timestamp?: number;
   entities?: Record<string, string[]>;
 }
 
 export interface SessionInsights {
+  summary_method?: 'extractive' | 'llm';
   executive_summary: string;
   action_items: string[];
   key_points: string[];

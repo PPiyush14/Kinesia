@@ -8,10 +8,10 @@
     "build": "npm --prefix frontend run build",
     "preview": "npm --prefix frontend run preview",
     "typecheck": "npm --prefix frontend run typecheck",
-    "server": "python run_kinesia.py",
+    "server": "python -m backend.dashboard_server",
     "test": "python -m pytest tests/ -q"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19.0"
   }
 }

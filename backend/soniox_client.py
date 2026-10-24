@@ -19,6 +19,7 @@ class SonioxTranscriptionResult:
     transcript: str
     detected_language: str | None
     confidence: float = 1.0
+    translation: str = ""
 
 
 @dataclass(frozen=True)
@@ -159,7 +160,12 @@ class SonioxClient:
                     raise
                 if on_interim is not None:
                     on_interim("")
-                time.sleep(self._retry_delay_for_attempt(attempt))
+                delay = self._retry_delay_for_attempt(attempt)
+                if stop_event is not None:
+                    if stop_event.wait(delay):
+                        return
+                else:
+                    time.sleep(delay)
 
     def _stream_microphone_session_once(
         self,
@@ -259,16 +265,16 @@ class SonioxClient:
             def watch_for_stop_request() -> None:
                 if stop_event is None:
                     return
-                stop_event.wait()
-                if not stop_event.is_set():
-                    return
-                connection_stop_event.set()
-                capture_stop_event.set()
-                utterance_pause_event.set()
-                try:
-                    websocket.close()
-                except Exception:
-                    pass
+                while not connection_stop_event.wait(0.1):
+                    if stop_event.is_set():
+                        connection_stop_event.set()
+                        capture_stop_event.set()
+                        utterance_pause_event.set()
+                        try:
+                            websocket.close()
+                        except Exception:
+                            pass
+                        return
 
             capture_thread = threading.Thread(target=capture_audio, daemon=True)
             keepalive_thread = threading.Thread(
@@ -362,6 +368,8 @@ class SonioxClient:
                 utterance_pause_event.set()
                 capture_thread.join()
                 keepalive_thread.join()
+                if stop_thread is not None:
+                    stop_thread.join(timeout=1)
 
         if stop_event is not None and stop_event.is_set():
             if on_interim is not None:
@@ -380,6 +388,7 @@ class SonioxClient:
         *,
         sample_rate: int | None = None,
         channels: int | None = None,
+        target_language: str | None = None,
     ) -> SonioxTranscriptionResult:
         attempt = 0
         while True:
@@ -390,6 +399,7 @@ class SonioxClient:
                     session_language_hint=session_language_hint,
                     sample_rate=sample_rate,
                     channels=channels,
+                    target_language=target_language,
                 )
             except BaseException as exc:
                 attempt += 1
@@ -405,6 +415,7 @@ class SonioxClient:
         *,
         sample_rate: int | None = None,
         channels: int | None = None,
+        target_language: str | None = None,
     ) -> SonioxTranscriptionResult:
         if not audio_bytes:
             return SonioxTranscriptionResult(transcript="", detected_language=None)
@@ -417,13 +428,22 @@ class SonioxClient:
             sample_rate=active_sample_rate,
             channels=active_channels,
         )
+        # This is a finite clip, not an ongoing microphone session. An endpoint
+        # inside the clip must not truncate the remaining speech.
+        request_config["enable_endpoint_detection"] = False
+        if target_language:
+            request_config["translation"] = {"type": "one_way", "target_language": target_language}
 
         final_tokens: list[dict] = []
         sender_error: list[BaseException] = []
         stop_event = threading.Event()
         send_lock = threading.Lock()
+        duration = len(audio_bytes) / float(active_sample_rate * active_channels * 2)
+        deadline = time.monotonic() + max(30.0, duration * 2)
+        legacy_text = ""
+        translated_tokens: list[dict] = []
 
-        with connect(self.websocket_url) as websocket:
+        with connect(self.websocket_url, open_timeout=10, close_timeout=2) as websocket:
             websocket.send(json.dumps(request_config))
             sender = threading.Thread(
                 target=self._stream_audio,
@@ -448,7 +468,15 @@ class SonioxClient:
 
             try:
                 while True:
-                    message = websocket.recv()
+                    if sender_error:
+                        raise RuntimeError("Failed to stream audio to Soniox") from sender_error[0]
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("Soniox did not finish transcribing the audio clip in time.")
+                    try:
+                        message = websocket.recv(timeout=min(1.0, remaining))
+                    except TimeoutError:
+                        continue
                     response = json.loads(message)
                     if response.get("error_code") is not None:
                         raise RuntimeError(
@@ -462,53 +490,41 @@ class SonioxClient:
                         or []
                     )
 
-                    maybe_transcript, _ = self._parse_tokens(tokens, final_tokens)
-                    if maybe_transcript is not None:
-                        detected_language, confidence = self._detect_language_and_confidence(final_tokens)
-                        return SonioxTranscriptionResult(
-                            transcript=maybe_transcript,
-                            detected_language=detected_language,
-                            confidence=confidence,
-                        )
-
-                    # Prompt return on stream completion tokens
-                    if any(t.get("text") in {"<end>", "<fin>"} for t in tokens):
-                        transcript = self._render_tokens(final_tokens)
-                        detected_language, confidence = self._detect_language_and_confidence(final_tokens)
-                        return SonioxTranscriptionResult(
-                            transcript=transcript,
-                            detected_language=detected_language,
-                            confidence=confidence,
-                        )
-
-                    legacy_text = self._extract_legacy_text(response)
-                    if legacy_text is not None:
-                        detected_language, confidence = self._detect_language_and_confidence(final_tokens)
-                        return SonioxTranscriptionResult(
-                            transcript=legacy_text,
-                            detected_language=detected_language,
-                            confidence=confidence,
-                        )
+                    # Non-final tokens are replaceable hypotheses, never input
+                    # to translation or TTS. Consume every final token, including
+                    # tokens after endpoint markers in the same response.
+                    final_tokens.extend(
+                        token for token in tokens
+                        if token.get("is_final") and token.get("text") not in {"<end>", "<fin>"}
+                        and token.get("translation_status") != "translation"
+                    )
+                    translated_tokens.extend(
+                        token for token in tokens if token.get("is_final")
+                        and token.get("text") not in {"<end>", "<fin>"}
+                        and token.get("translation_status") == "translation"
+                    )
+                    legacy_text = self._extract_legacy_text(response) or legacy_text
 
                     if response.get("finished"):
                         break
             except ConnectionClosedOK:
-                pass
+                raise RuntimeError("Soniox closed the stream before confirming it finished.")
             finally:
                 stop_event.set()
-
-            sender.join()
-            keepalive.join()
+                websocket.close()
+                sender.join(timeout=2)
+                keepalive.join(timeout=2)
 
         if sender_error:
             raise RuntimeError(f"Failed to stream audio to Soniox: {sender_error[0]}")
 
-        transcript = self._render_tokens(final_tokens)
+        transcript = self._render_tokens(final_tokens) or legacy_text
         detected_language, confidence = self._detect_language_and_confidence(final_tokens)
         return SonioxTranscriptionResult(
             transcript=transcript,
             detected_language=detected_language,
             confidence=confidence,
+            translation=self._render_tokens(translated_tokens),
         )
 
     def _build_request_config(
@@ -555,7 +571,9 @@ class SonioxClient:
                 if delay_seconds > 0:
                     time.sleep(delay_seconds)
             with send_lock:
-                websocket.send(json.dumps({"type": "finalize", "trailing_silence_ms": 300}))
+                # An empty TEXT frame ends a finite stream. `finalize` keeps it
+                # open and can produce several endpoints before all audio is done.
+                websocket.send("")
         except BaseException as exc:  # pragma: no cover - defensive thread capture
             sender_error.append(exc)
 
@@ -614,6 +632,7 @@ class SonioxClient:
         final_tokens: list[dict],
     ) -> tuple[str | None, str]:
         non_final_tokens: list[dict] = []
+        ended = False
         for token in tokens:
             token_text = str(token.get("text") or "")
             if not token.get("is_final"):
@@ -621,14 +640,15 @@ class SonioxClient:
                     non_final_tokens.append(token)
                 continue
             if token_text in {"<end>", "<fin>"}:
-                transcript = self._render_tokens(final_tokens)
-                if transcript:
-                    return transcript, transcript
-                final_tokens.clear()
+                ended = True
                 continue
             if token_text:
                 final_tokens.append(token)
         interim_text = self._render_tokens(final_tokens + non_final_tokens)
+        if ended:
+            transcript = self._render_tokens(final_tokens)
+            # Empty finalizations still release a paused microphone capture.
+            return transcript, interim_text
         return None, interim_text
 
     def _extract_legacy_text(self, response: dict) -> str | None:

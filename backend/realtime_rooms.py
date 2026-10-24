@@ -1,0 +1,245 @@
+"""Async audio routing around the existing room membership/persistence APIs."""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import queue
+import struct
+import time
+import uuid
+
+from backend.realtime_providers import CartesiaStream, SonioxStream
+
+
+class RealtimeSession:
+    def __init__(self, runtime, room, profile, events, websocket):
+        self.runtime, self.room, self.profile = runtime, room, profile
+        self.user_id, self.events, self.websocket = profile["id"], events, websocket
+        self.outgoing = asyncio.Queue(maxsize=128)
+        self.lanes = {}
+        self.primary = None
+        self.audio_ms = 0.0
+        self.closed = False
+        self.ending = False
+        self.overloaded = False
+        self.last_speaking_event = 0.0
+
+    @property
+    def participant(self):
+        participant = self.room.participants.get(self.user_id)
+        return participant if participant and participant.event_queue is self.events else None
+
+    def send(self, message):
+        if self.closed:
+            return
+        try:
+            self.outgoing.put_nowait(message)
+        except asyncio.QueueFull:
+            self.overloaded = True
+
+    def error(self, message, provider="soniox"):
+        self.send({"type": "pipeline_error", "data": {"provider": provider, "message": message}})
+
+    def caption(self, target, data):
+        data = dict(data, speaker_id=self.user_id, speaker_name=self.profile.get("display_name") or self.profile["username"])
+        for listener in self.runtime.listeners(self.room.room_code, target):
+            listener.send({"type": "caption", "data": data})
+        if target == self.primary and self not in self.runtime.listeners(self.room.room_code, target):
+            self.send({"type": "caption", "data": dict(data, localized_text=data["original_text"])})
+
+    async def final(self, segment):
+        await asyncio.to_thread(
+            self.runtime.coordinator.record_stream_segment, self.room.room_code, self.user_id,
+            self.profile.get("display_name") or self.profile["username"], segment,
+        )
+
+    async def update_routes(self):
+        participant = self.participant
+        if not participant or participant.is_muted or self.ending:
+            desired = set()
+        else:
+            desired = {session.participant.listening_lang for session in self.runtime.sessions.values()
+                       if session.room is self.room and session.participant and session.user_id != self.user_id}
+            desired = desired or {participant.speaking_lang}
+            # Retain the primary STT route while speaking so audio timestamps and
+            # source captions do not reset when a listener joins/leaves.
+            if self.primary:
+                desired.add(self.primary)
+            self.primary = self.primary if self.primary in desired else min(desired)
+        for language in list(self.lanes):
+            if language not in desired or self.lanes[language].source != (participant.speaking_lang if participant else ""):
+                await self.lanes.pop(language).close()
+        for language in sorted(desired):
+            if language not in self.lanes:
+                lane = TranslationLane(self, participant.speaking_lang, language)
+                self.lanes[language] = lane
+                lane.start()
+
+    async def bridge_events(self):
+        while not self.closed:
+            if self.participant is None:
+                self.send({"_close": 4009})
+                await asyncio.Future()
+            try:
+                event = await asyncio.to_thread(self.events.get, True, 0.25)
+            except queue.Empty:
+                continue
+            if event.get("type") in {"session_concluded", "session_ended"}:
+                while not self.outgoing.empty():
+                    self.outgoing.get_nowait()
+                self.send({"type": "audio_reset"})
+                self.send(event)
+                await asyncio.Future()
+            self.send(event)
+
+    async def writer(self):
+        while not self.closed:
+            if self.overloaded:
+                await self.websocket.close(code=1013, reason="Audio connection is too slow; reconnect.")
+                return
+            try:
+                message = await asyncio.wait_for(self.outgoing.get(), 1)
+            except asyncio.TimeoutError:
+                continue
+            if isinstance(message, bytes):
+                await asyncio.wait_for(self.websocket.send_bytes(message), 5)
+            elif message.get("_close"):
+                await self.websocket.close(code=message["_close"])
+                return
+            else:
+                await asyncio.wait_for(self.websocket.send_json(message), 5)
+                if message.get("type") in {"session_concluded", "session_ended"}:
+                    await self.websocket.close(code=1000)
+                    return
+
+    async def receive_audio(self, data):
+        participant = self.participant
+        if not participant or participant.is_muted or self.ending:
+            return
+        if not data or len(data) % 2 or len(data) > 16384:
+            raise ValueError("Expected small 16-kHz mono PCM16 audio frames.")
+        self.audio_ms += len(data) / 32
+        for lane in self.lanes.values():
+            lane.soniox.feed(data)
+
+    async def close(self):
+        self.closed = True
+        await asyncio.gather(*(lane.close() for lane in self.lanes.values()), return_exceptions=True)
+        self.lanes.clear()
+
+
+class TranslationLane:
+    def __init__(self, session, source, target):
+        self.session, self.source, self.target = session, source, target
+        self.queue = asyncio.Queue(maxsize=8)
+        self.cartesia = CartesiaStream(session.runtime.config)
+        self.soniox = SonioxStream(session.runtime.config, source, target, session.audio_ms,
+                                   lambda caption: session.caption(target, caption), self.phrase,
+                                   session.final, session.error)
+        self.task = None
+
+    def start(self):
+        self.soniox.start()
+        self.task = asyncio.create_task(self.speak())
+
+    def phrase(self, text, utterance_id):
+        listeners = [listener for listener in self.session.runtime.listeners(self.session.room.room_code, self.target)
+                     if listener.user_id != self.session.user_id]
+        if not listeners:
+            return
+        try:
+            self.queue.put_nowait((text, utterance_id, time.monotonic()))
+        except asyncio.QueueFull:
+            self.session.error("Translated speech is falling behind. Shorter turns will help; captions remain available.", "playback")
+
+    async def speak(self):
+        while True:
+            text, utterance_id, queued_at = await self.queue.get()
+            if time.monotonic() - queued_at > 8:
+                self.session.error("Old queued speech was skipped to stay live. Read the transcript for the full conversation.", "playback")
+                continue
+            context = str(uuid.uuid4())
+            started = False
+            started_at = time.monotonic()
+            def listeners():
+                return [listener for listener in self.session.runtime.listeners(self.session.room.room_code, self.target)
+                        if listener.user_id != self.session.user_id]
+            async def chunk(audio, sequence, sample_rate, context=context, utterance_id=utterance_id, started_at=started_at):
+                nonlocal started
+                if not started:
+                    for listener in listeners():
+                        listener.send({"type": "audio_start", "data": {
+                            "stream_id": context, "utterance_id": utterance_id, "speaker_id": self.session.user_id,
+                            "sample_rate": sample_rate, "language": self.target,
+                            "voice_start_ms": round((time.monotonic() - started_at) * 1000),
+                        }})
+                    started = True
+                packet = b"KNS1" + uuid.UUID(context).bytes + struct.pack(">I", sequence) + audio
+                for listener in listeners():
+                    listener.send(packet)
+            try:
+                await self.cartesia.synthesize(text, self.target, context, chunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - provider failures must preserve caption delivery.
+                for listener in listeners():
+                    listener.error("Cartesia speech is unavailable. Captions are still live; check the API key, voice and credits.", "cartesia")
+            finally:
+                for listener in listeners():
+                    listener.send({"type": "audio_end", "data": {"stream_id": context}})
+
+    async def close(self):
+        await self.soniox.close()
+        if self.task:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+        await self.cartesia.close()
+
+
+class RealtimeRooms:
+    def __init__(self, coordinator, config):
+        self.coordinator, self.config = coordinator, config
+        self.sessions = {}
+        self.lock = asyncio.Lock()
+
+    def listeners(self, room_code, language):
+        return [session for (code, _), session in self.sessions.items()
+                if code == room_code and session.participant and session.participant.listening_lang == language and not session.closed]
+
+    async def refresh(self, room_code):
+        async with self.lock:
+            await asyncio.gather(*(session.update_routes() for (code, _), session in self.sessions.items() if code == room_code))
+
+    async def attach(self, room, profile, events, websocket):
+        key = (room.room_code, profile["id"])
+        previous = self.sessions.get(key)
+        if previous:
+            with contextlib.suppress(Exception):
+                await previous.websocket.close(code=4009, reason="Joined from another tab.")
+            await previous.close()
+        session = RealtimeSession(self, room, profile, events, websocket)
+        self.sessions[key] = session
+        try:
+            await self.refresh(room.room_code)
+        except BaseException:
+            await self.detach(session)
+            raise
+        return session
+
+    async def detach(self, session):
+        key = (session.room.room_code, session.user_id)
+        if self.sessions.get(key) is session:
+            del self.sessions[key]
+            await asyncio.to_thread(self.coordinator.leave_room, session.room.room_code, session.user_id, session.events)
+        await session.close()
+        await self.refresh(session.room.room_code)
+
+    async def flush_room(self, room_code):
+        sessions = [session for (code, _), session in self.sessions.items() if code == room_code]
+        for session in sessions:
+            session.ending = True
+        await asyncio.gather(*(lane.soniox.flush() for session in sessions for lane in session.lanes.values()), return_exceptions=True)
+
+    async def close(self):
+        await asyncio.gather(*(session.close() for session in list(self.sessions.values())), return_exceptions=True)
+        self.sessions.clear()

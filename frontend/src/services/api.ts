@@ -8,6 +8,13 @@ export const getStoredToken = (): string | null => localStorage.getItem(TOKEN_KE
 export const setStoredToken = (token: string): void => localStorage.setItem(TOKEN_KEY, token);
 export const removeStoredToken = (): void => localStorage.removeItem(TOKEN_KEY);
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 export async function apiCall<T>(
   endpoint: string,
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE' = 'GET',
@@ -34,14 +41,18 @@ export async function apiCall<T>(
 
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
   const response = await fetch(url, options);
-  const result = await response.json().catch(() => ({}));
+  const result = await response.json().catch(() => null);
+
+  if (!result || typeof result !== 'object') {
+    throw new ApiError('The backend is waking up or temporarily unavailable. Please retry.', response.ok ? 502 : response.status);
+  }
 
   if (!response.ok) {
     const errorMsg =
       (result as { error?: string; message?: string }).error ||
       (result as { message?: string }).message ||
       `Request failed with status ${response.status}`;
-    throw new Error(errorMsg);
+    throw new ApiError(errorMsg, response.status);
   }
 
   return ((result as { data?: T }).data !== undefined
@@ -107,7 +118,7 @@ export const roomService = {
       `/api/v1/rooms/${code}/verify`,
       'POST',
       { passcode },
-      false
+      true
     );
     return res.valid;
   },
@@ -118,6 +129,7 @@ export const roomService = {
       text: string;
       source_lang: string;
       confidence?: number;
+      utterance_id?: string;
     }
   ): Promise<unknown> {
     return apiCall(`/api/v1/rooms/${code}/speak`, 'POST', params, true);
@@ -129,6 +141,7 @@ export const roomService = {
       audio_base64: string;
       source_lang: string;
       mime_type?: string;
+      utterance_id?: string;
     }
   ): Promise<unknown> {
     return apiCall(`/api/v1/rooms/${code}/speak-audio`, 'POST', params, true);
@@ -147,7 +160,7 @@ export const roomService = {
   },
 
   async getInsights(code: string): Promise<SessionInsights> {
-    return apiCall<SessionInsights>(`/api/v1/rooms/${code}/insights`, 'GET', null, false);
+    return apiCall<SessionInsights>(`/api/v1/rooms/${code}/insights`, 'GET', null, true);
   },
 
   async getParticipants(code: string): Promise<Participant[]> {

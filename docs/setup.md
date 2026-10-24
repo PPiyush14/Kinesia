@@ -5,6 +5,10 @@
 
 ---
 
+> For the current Soniox + Cartesia browser meeting app, use
+> [Render deployment](RENDER_DEPLOYMENT.md) and the root README.
+> The workstation/edge setup below describes the legacy pipeline.
+
 ## 1. System Requirements
 
 - **Operating System:** Windows 10/11 (64-bit), Linux (Ubuntu 20.04+), or macOS (12+)

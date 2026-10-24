@@ -214,7 +214,7 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
             Session History & Notes
           </h1>
           <p className="text-xs sm:text-sm text-ink-muted mt-1">
-            Browse past dialogues, review AI-generated conversation summaries, and manage recorded logs.
+            Browse past dialogues, review saved conversation notes, and manage recorded transcripts.
           </p>
         </div>
 
