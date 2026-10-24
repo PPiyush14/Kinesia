@@ -5,10 +5,8 @@ import {
   User,
   LogOut,
   Plus,
-  Radio,
-  Sparkles,
 } from 'lucide-react';
-import type { User as UserType, ViewState } from '@/types';
+import { SUPPORTED_LANGUAGES, type User as UserType, type ViewState } from '@/types';
 import { KinesiaLogo } from '@/components/brand/KinesiaLogo';
 import { Button } from '@/components/ui/Button';
 import { initials } from '@/lib/utils';
@@ -112,12 +110,11 @@ export function Sidebar({
           <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-surface-2/60 border border-border-subtle text-2xs text-ink-muted">
             <div className="flex items-center gap-2">
               <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
               </span>
-              <span className="font-medium text-ink-secondary">Engine: Online</span>
+              <span className="font-medium text-ink-secondary">Speech translation</span>
             </div>
-            <span className="font-mono text-accent">9 Langs</span>
+            <span className="font-mono text-accent">{SUPPORTED_LANGUAGES.length} languages</span>
           </div>
 
           {/* User profile capsule */}

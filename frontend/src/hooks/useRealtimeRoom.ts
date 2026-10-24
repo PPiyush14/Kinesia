@@ -208,8 +208,8 @@ export function useRealtimeRoom(
         (active) => {
           if (disposed) return;
           setIsSpeaking(active);
-          // Local speech takes priority; do not globally mute microphone capture.
-          if (active) engine.player?.reset();
+          // Full-duplex conversation: local speech must not discard the tail of
+          // another participant's translated sentence. Output mute is explicit.
           const socket = socketRef.current;
           if (socket?.readyState === WebSocket.OPEN)
             socket.send(JSON.stringify({ type: 'speaking', active }));

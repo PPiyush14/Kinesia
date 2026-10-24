@@ -1,14 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowLeft,
   Check,
-  ChevronDown,
   Copy,
   Download,
   FileText,
   Headphones,
-  Languages,
   Mic,
   MicOff,
   PhoneOff,
@@ -27,7 +24,6 @@ import { SUPPORTED_LANGUAGES, langLabel, langShort } from '@/types';
 import { roomService } from '@/services/api';
 import { useRealtimeRoom } from '@/hooks/useRealtimeRoom';
 import { Button } from '@/components/ui/Button';
-import { Badge } from '@/components/ui/Badge';
 import { cn, initials } from '@/lib/utils';
 import { mergeTranscriptHistory } from '@/lib/transcripts';
 
@@ -446,9 +442,10 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                 <button
                   onClick={() => setOriginal(!original)}
                   aria-pressed={original}
+                  title="Show the speaker's original words beneath the translation"
                   className="flex items-center gap-1 text-ink-muted hover:text-ink-primary"
                 >
-                  Original {original && <Check size={11} />}
+                  Show original text {original && <Check size={11} />}
                 </button>
               </div>
               <p
@@ -513,7 +510,8 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                   variant="ghost"
                   size="sm"
                   onClick={() => setModal('clear')}
-                  disabled={!transcripts.length}
+                  disabled={!transcripts.length || !isHost}
+                  title={isHost ? 'Clear the shared transcript for everyone' : 'Only the host can clear the shared transcript'}
                   className="text-danger"
                   leftIcon={<Trash2 size={13} />}
                 >
@@ -630,7 +628,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                 {modal === 'end'
                   ? 'Everyone will leave the live room. Saved transcripts and session notes will be available afterward.'
                   : modal === 'clear'
-                    ? 'This removes the saved transcript for everyone in the room. This cannot be undone.'
+                    ? 'This removes the shared transcript and saved notes for everyone in the room. New speech can still be recorded while the room is active.'
                     : 'Your microphone and audio will disconnect. You can rejoin while the room is active.'}
               </p>
               <div className="mt-6 flex justify-end gap-2">

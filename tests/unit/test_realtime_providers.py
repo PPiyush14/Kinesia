@@ -49,6 +49,22 @@ def test_repeated_sentences_are_distinct_stream_turns():
     assert results[0].turn_id != results[1].turn_id
 
 
+def test_final_sentence_can_start_speech_without_a_trailing_space_or_endpoint():
+    buffer = TranscriptBuffer("en", "en")
+    buffer.feed([token("Hello everyone.")])
+    assert buffer.phrase() == "Hello everyone."
+    assert buffer.phrase() == ""
+    buffer.feed([token(" We meet tomorrow.")])
+    assert buffer.phrase() == "We meet tomorrow."
+    assert buffer.phrase(final=True) == ""
+
+
+def test_short_greeting_does_not_block_the_next_stable_sentence():
+    buffer = TranscriptBuffer("en", "en")
+    buffer.feed([token("Hi. Welcome to the conversation.")])
+    assert buffer.phrase() == "Hi. Welcome to the conversation."
+
+
 def test_code_switching_does_not_obey_language_hint_as_a_translation_bypass():
     buffer = TranscriptBuffer("en", "en")
     buffer.feed([token("नमस्ते", language="hi"), token("Hello", translation=True)])

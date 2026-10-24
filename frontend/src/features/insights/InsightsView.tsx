@@ -14,7 +14,7 @@ interface InsightsViewProps {
   onToast: (msg: string, tone?: 'success' | 'error' | 'info') => void;
 }
 
-export function InsightsView({ room, insights, onReturnToWorkspace, onReturnToHome, onToast }: InsightsViewProps) {
+export function InsightsView({ room, insights, onReturnToWorkspace, onToast }: InsightsViewProps) {
   const [copied, setCopied] = useState(false);
 
   const summary = insights?.executive_summary?.trim() || 'No summary was generated for this session.';
@@ -85,7 +85,7 @@ export function InsightsView({ room, insights, onReturnToWorkspace, onReturnToHo
           <CardHeader>
             <div className="flex items-center gap-2">
               <FileText size={16} className="text-accent" />
-              <h2 className="text-sm font-semibold text-ink-primary">{insights?.summary_method === 'extractive' ? 'Session overview' : 'Executive summary'}</h2>
+              <h2 className="text-sm font-semibold text-ink-primary">Conversation overview</h2>
             </div>
           </CardHeader>
           <CardContent>
@@ -120,7 +120,7 @@ export function InsightsView({ room, insights, onReturnToWorkspace, onReturnToHo
             <CardHeader>
               <div className="flex items-center gap-2">
                 <ListTodo size={16} className="text-warn" />
-                <h2 className="text-sm font-semibold text-ink-primary">{insights?.summary_method === 'extractive' ? 'Possible commitments — review' : 'Action items'}</h2>
+                <h2 className="text-sm font-semibold text-ink-primary">{insights?.summary_method === 'extractive' ? 'Possible follow-ups — review' : 'Follow-ups'}</h2>
               </div>
             </CardHeader>
             <CardContent>
@@ -176,7 +176,7 @@ function buildMarkdown(
     lines.push('## Key Points', '', ...keyPoints.map((p) => `- ${p}`), '');
   }
   if (actionItems.length) {
-    lines.push('## Next Steps & Action Items', '', ...actionItems.map((a) => `- [ ] ${a}`), '');
+    lines.push('## Possible Follow-ups', '', ...actionItems.map((a) => `- [ ] ${a}`), '');
   }
   return lines.join('\n');
 }

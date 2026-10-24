@@ -1,5 +1,11 @@
 # Soniox + Cartesia meetings on Render
 
+The user's current deployment is **one Docker web service serving both the
+frontend and backend**, plus Render PostgreSQL. The built frontend is committed
+under `backend/web`; the existing Dockerfile serves it with the API and WebSocket
+on the same public origin. No separate frontend service or `VITE_API_BASE_URL`
+is required for that setup. The separate-frontend section below is optional.
+
 The meeting pipeline is browser AudioWorklet → authenticated backend WebSocket
 → Soniox recognition and native speech translation → Cartesia streaming TTS
 → listener PCM playback. Provider keys stay on the backend. Final tokens drive
@@ -62,7 +68,7 @@ speaker/target language and shares its result among listeners. Provider concurre
 quotas and credits can impose lower practical limits. No Redis or paid Render
 upgrade is required for the current single-instance setup.
 
-## Frontend service
+## Optional separate frontend service
 
 Set `VITE_API_BASE_URL` to the backend HTTPS **origin**, for example
 `https://your-backend.onrender.com`, without `/api` or a trailing slash. This is a
@@ -101,8 +107,10 @@ JWT secret to a `VITE_*` variable. Local `.env` is excluded from Git and Docker.
    the same account. The newer tab owns the subscription; the older tab stops.
 6. End the room as host; verify microphones/playback stop and notes appear.
    Reopen history after refresh. Test a passcode room and a room with recording
-   disabled. Verify non-host room deletion is rejected. Account/room deletion
-   controls perform real deletes only when you explicitly invoke them.
+   disabled. Verify non-hosts cannot end the room or clear the shared transcript.
+   Each participant can remove an individual room or all history entries from
+   their own account without deleting anyone else's transcript, notes or live
+   session. Explicit rejoining restores the account's room entry.
 
 Free-tier cold starts are expected. A temporarily unavailable backend preserves
 the saved login and offers retry. Active streaming quality, real acoustic echo,
@@ -151,8 +159,8 @@ This has successfully exercised Cartesia English synthesis → Soniox English
 recognition/Hindi translation → Cartesia Hindi synthesis using the local keys.
 Its generation timing is not a microphone-to-listener latency measurement.
 
-Verification on 2026-10-24: 91 backend tests passed; 14 frontend unit regressions
-and 5 Chrome browser tests passed; TypeScript/Vite production build passed;
+Follow-up verification on 2026-10-24: 98 backend tests passed; 17 frontend unit regressions
+and 8 Chrome browser tests passed; strict TypeScript/Vite production build passed;
 `npm audit` reported zero vulnerabilities. Static checks passed for the new
 streaming modules and tests, plus undefined-name/duplicate-definition checks
 across the backend. The backend suite has one dependency deprecation warning

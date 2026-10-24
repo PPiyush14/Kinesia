@@ -1,7 +1,6 @@
-import { Menu, Languages, Headphones, Plus, ArrowLeft } from 'lucide-react';
+import { Menu, Languages, Headphones, ArrowLeft } from 'lucide-react';
 import type { User, ViewState } from '@/types';
 import { langShort } from '@/types';
-import { Button } from '@/components/ui/Button';
 import { initials } from '@/lib/utils';
 
 interface AppHeaderProps {
@@ -27,8 +26,6 @@ export function AppHeader({
   currentView,
   onNavigate,
   onOpenMobileMenu,
-  onLogout,
-  onNewSession,
 }: AppHeaderProps) {
   const title = titles[currentView] || 'Kinesia';
 

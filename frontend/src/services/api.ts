@@ -66,7 +66,6 @@ export const authService = {
     display_name: string;
     email: string;
     password: string;
-    gender: 'male' | 'female';
     default_input_lang: string;
     default_output_lang: string;
   }): Promise<AuthResponse> {

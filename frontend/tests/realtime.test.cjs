@@ -14,7 +14,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-function hooks(name, globals = {}, modulePath = name) {
+function hooks(name, globals = {}, modulePath = name, modules = {}) {
   const slots = [];
   let cursor = 0;
   let effects = [];
@@ -48,8 +48,8 @@ function hooks(name, globals = {}, modulePath = name) {
   const source = fs.readFileSync(filename, 'utf8').replace('import.meta.env.VITE_API_BASE_URL', "''");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const context = vm.createContext({
-    module, exports: module.exports, require: (id) => { assert.equal(id, 'react'); return react; },
-    console, URLSearchParams, Float32Array, ArrayBuffer, DataView, Uint8Array,
+    module, exports: module.exports, require: (id) => { if (id in modules) return modules[id]; assert.equal(id, 'react'); return react; },
+    console, URL, URLSearchParams, Float32Array, ArrayBuffer, DataView, Uint8Array,
     btoa: (binary) => Buffer.from(binary, 'binary').toString('base64'),
     setTimeout: (fn) => { timers.set(++timerId, fn); return timerId; },
     clearTimeout: (id) => timers.delete(id), ...globals,
@@ -86,6 +86,77 @@ const stream = () => {
   const track = { stopped: false, stop() { this.stopped = true; } };
   return { track, getTracks: () => [track] };
 };
+
+test('local microphone speech preserves incoming translated audio during full-duplex conversation', async () => {
+  const sockets = [], engines = [];
+  class Socket {
+    static OPEN = 1;
+    readyState = 1;
+    sent = [];
+    constructor() { sockets.push(this); }
+    send(data) { this.sent.push(data); }
+    close() { this.readyState = 3; }
+  }
+  class Engine {
+    resets = 0;
+    player = { reset: () => this.resets++ };
+    constructor() { engines.push(this); }
+    startMicrophone(audio, speaking) { this.audio = audio; this.speaking = speaking; return Promise.resolve(); }
+    stopMicrophone() {} dispose() {}
+  }
+  const hook = hooks('useRealtimeRoom', { WebSocket: Socket, window: { location: { origin: 'https://test.invalid' } } }, 'useRealtimeRoom', {
+    '@/services/api': { API_BASE: '' }, '@/lib/realtimeAudio': { RealtimeAudioEngine: Engine },
+  });
+  const options = { speakingLang: 'en', listeningLang: 'hi', micMuted: false, audioMuted: false };
+  hook.render('room', 'token', {}, options);
+  sockets[0].onopen();
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'connected', data: {} }) });
+  hook.render('room', 'token', {}, options);
+  await settle();
+  engines[0].speaking(true);
+  assert.equal(engines[0].resets, 0, 'starting to speak discarded the incoming sentence');
+  const pcm = new ArrayBuffer(3200);
+  engines[0].audio(pcm);
+  assert.equal(sockets[0].sent.at(-1), pcm);
+  hook.render('room', 'token', {}, { ...options, audioMuted: true });
+  assert.equal(engines[0].resets, 1, 'explicit output mute must still stop playback');
+  hook.unmount();
+});
+
+test('speaker test plays one chime on the selected output and closes its context', async () => {
+  const contexts = [];
+  class AudioContext {
+    currentTime = 0; destination = {}; oscillators = 0; closed = false;
+    constructor() { contexts.push(this); }
+    async setSinkId(id) { this.sink = id; }
+    async resume() {}
+    async close() { this.closed = true; }
+    createOscillator() { this.oscillators++; return { frequency: { setValueAtTime() {} }, connect() {}, start() {}, stop() {} }; }
+    createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} }; }
+  }
+  const hook = hooks('useAudioDevices', { window: { AudioContext }, navigator: { mediaDevices: {} }, localStorage: { getItem: () => null } });
+  const devices = hook.render();
+  const result = devices.testSpeaker('headphones');
+  await settle();
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0].sink, 'headphones');
+  assert.equal(contexts[0].oscillators, 3, 'one C-E-G chime must have three oscillators');
+  hook.fireTimers();
+  assert.equal(await result, true);
+  assert.equal(contexts[0].closed, true);
+  hook.unmount();
+});
+
+test('leaving during speaker-test setup cannot start audio after unmount', async () => {
+  let contexts = 0;
+  class AudioContext { constructor() { contexts++; } }
+  const hook = hooks('useAudioDevices', { window: { AudioContext }, navigator: { mediaDevices: {} }, localStorage: { getItem: () => null } });
+  const devices = hook.render();
+  const pending = devices.testSpeaker();
+  hook.unmount();
+  assert.equal(await pending, false);
+  assert.equal(contexts, 0);
+});
 
 test('capture includes the onset frame once and emits one WAV per utterance', async () => {
   const output = [];

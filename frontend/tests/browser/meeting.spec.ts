@@ -13,29 +13,32 @@ const room = {
   room_code: 'kin-123-abc',
   title: 'Multilingual design review',
   host_id: 'me',
+  is_host: true,
+  status: 'live',
   is_active: true,
   record_session: true,
 };
 
-async function meeting(page: Page) {
+async function meeting(page: Page, initialView = 'dialogue', historyRooms = [room]) {
   let socket: WebSocketRoute | null = null;
   let microphoneFrames = 0;
   const sentMessages: unknown[] = [];
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.addInitScript(
-    ({ user, room }) => {
+    ({ room, initialView }) => {
       localStorage.setItem('kinesia_auth_token', 'browser-test-token');
-      localStorage.setItem('kinesia_view', 'dialogue');
+      localStorage.setItem('kinesia_view', initialView);
       localStorage.setItem('kinesia_room_code', room.room_code);
       sessionStorage.setItem('kinesia_join_muted', 'true');
     },
-    { user, room }
+    { room, initialView }
   );
   await page.route('**/api/**', async (route) => {
     const url = route.request().url();
     let data: unknown = {};
     if (url.endsWith('/auth/me')) data = user;
+    else if (url.endsWith('/api/v1/rooms')) data = historyRooms;
     else if (url.endsWith('/transcripts')) data = [];
     else if (url.endsWith('/speak')) {
       sentMessages.push(route.request().postDataJSON());
@@ -79,8 +82,10 @@ async function meeting(page: Page) {
     });
   });
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: room.title })).toBeVisible();
-  await expect(page.getByText('Live translation', { exact: true })).toBeVisible();
+  if (initialView === 'dialogue') {
+    await expect(page.getByRole('heading', { name: room.title })).toBeVisible();
+    await expect(page.getByText('Live translation', { exact: true })).toBeVisible();
+  } else await expect(page.getByRole('heading', { name: room.title, exact: true })).toBeVisible();
   return {
     send: (type: string, data: unknown) => socket!.send(JSON.stringify({ type, data })),
     frames: () => microphoneFrames,
@@ -93,6 +98,10 @@ test('meeting renders captions, deduplicates revised turns, and exports a transc
   const connection = await meeting(page);
   await expect(page.getByLabel('Speaking language')).toHaveValue('en');
   await expect(page.getByLabel('Listening language')).toHaveValue('hi');
+  await expect(page.getByRole('button', { name: 'Show original text' })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Show original text' }).click();
+  await expect(page.getByRole('button', { name: 'Show original text' })).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('button', { name: 'Show original text' }).click();
   const turn = {
     turn_id: 'one',
     revision: 1,
@@ -158,6 +167,50 @@ test('mobile layout exposes language, microphone, transcript and recovery contro
   await expect(page.getByRole('alert')).toContainText('temporarily unavailable');
   await expect(page.getByRole('button', { name: 'Reconnect audio' })).toBeVisible();
   await page.screenshot({ path: 'test-results/meeting-mobile.png', fullPage: true });
+  expect(connection.errors).toEqual([]);
+});
+
+test('creator reopening a room from history keeps the End meeting control', async ({ page }) => {
+  const connection = await meeting(page, 'history');
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await page.getByRole('button', { name: 'Re-join', exact: true }).click();
+  await page.getByRole('button', { name: 'Enter Conversation', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'End meeting', exact: true })).toBeVisible();
+  expect(connection.errors).toEqual([]);
+});
+
+test('history removal explains that other participants keep their copy', async ({ page }) => {
+  const connection = await meeting(page, 'history');
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Remove from my history', exact: true })).toHaveAttribute('title', /other participants keep/);
+  await page.getByRole('button', { name: 'Remove from my history', exact: true }).click();
+  await expect(page.getByText('No sessions found', { exact: true })).toBeVisible();
+  expect(connection.errors).toEqual([]);
+});
+
+test('a late history response cannot overwrite another selected conversation', async ({ page }) => {
+  const second = { ...room, id: 'second', room_code: 'kin-456-def', title: 'Second conversation' };
+  const connection = await meeting(page, 'history', [room, second]);
+  let release!: () => void;
+  let firstRequested = false;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/v1/rooms/*/insights', async (route) => {
+    if (route.request().url().includes(room.room_code)) {
+      firstRequested = true;
+      await gate;
+      await route.fulfill({ json: { data: { executive_summary: 'Stale first conversation notes' } } });
+    } else await route.fulfill({ json: { data: { executive_summary: 'Correct second conversation notes' } } });
+  });
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await expect.poll(() => firstRequested).toBe(true);
+  await page.getByRole('heading', { name: second.title, exact: true }).click();
+  await expect(page.getByText('Correct second conversation notes', { exact: true })).toBeVisible();
+  const response = page.waitForResponse((result) => result.url().includes(`${room.room_code}/insights`));
+  release();
+  await (await response).finished();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.getByText('Correct second conversation notes', { exact: true })).toBeVisible();
+  await expect(page.getByText('Stale first conversation notes', { exact: true })).toHaveCount(0);
   expect(connection.errors).toEqual([]);
 });
 

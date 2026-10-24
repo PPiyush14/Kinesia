@@ -205,6 +205,16 @@ def init_db() -> None:
                 """
             )
 
+            # A removal from history belongs to one account, not the shared room.
+            db.execute(
+                f"""CREATE TABLE IF NOT EXISTS room_history_hidden (
+                    room_id VARCHAR(36) REFERENCES rooms(id) ON DELETE CASCADE,
+                    user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
+                    hidden_at {real_type} NOT NULL,
+                    PRIMARY KEY (room_id, user_id)
+                )"""
+            )
+
             # Migration: Ensure gender column exists
             try:
                 if pg:

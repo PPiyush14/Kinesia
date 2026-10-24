@@ -24,6 +24,7 @@ export interface Room {
   has_passcode?: boolean;
   record_session?: boolean;
   host_id?: string;
+  is_host?: boolean;
   created_at?: string | number;
   ended_at?: string | number;
   updated_at?: string;

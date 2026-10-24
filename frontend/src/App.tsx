@@ -234,7 +234,6 @@ export default function App() {
   }
 
   // Views that take full viewport without shell
-  const isFullViewport = view === 'auth' || view === 'dialogue';
 
   if (view === 'auth') {
     return (

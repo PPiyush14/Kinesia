@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 export interface AudioDeviceInfo {
   deviceId: string;
@@ -18,6 +18,9 @@ export function useAudioDevices() {
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [speakerError, setSpeakerError] = useState<string | null>(null);
+  const chime = useRef<AudioContext | null>(null);
+  const chimeGeneration = useRef(0);
 
   const refreshDevices = useCallback(async () => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) return;
@@ -39,7 +42,7 @@ export function useAudioDevices() {
         }));
       setInputs(inDevices);
       setOutputs(outDevices);
-      if (inDevices.some((d) => Boolean(d.label && d.label !== `Microphone 1`))) {
+      if (devices.some((d) => d.kind === 'audioinput' && Boolean(d.label))) {
         setPermissionGranted(true);
         setPermissionDenied(false);
         setPermissionError(null);
@@ -74,6 +77,9 @@ export function useAudioDevices() {
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices);
     return () => {
       navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices);
+      chimeGeneration.current++;
+      void chime.current?.close().catch(() => {});
+      chime.current = null;
     };
   }, [requestPermission, refreshDevices]);
 
@@ -91,26 +97,48 @@ export function useAudioDevices() {
     }
   };
 
-  const testSpeaker = (deviceId?: string) => {
+  const testSpeaker = async (deviceId = selectedOutput) => {
+    const generation = ++chimeGeneration.current;
+    let ctx: AudioContext | null = null;
+    setSpeakerError(null);
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
+      if (!AudioCtx) throw new Error('Audio playback is unavailable in this browser.');
+      await chime.current?.close().catch(() => {});
+      if (generation !== chimeGeneration.current) return false;
+      ctx = new AudioCtx();
+      chime.current = ctx;
+      const context = ctx!;
+      if (deviceId && deviceId !== 'default') {
+        const routed = context as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+        if (!routed.setSinkId) throw new Error('This browser cannot select an output device. Choose the system default instead.');
+        await routed.setSinkId(deviceId);
+      }
+      if (generation !== chimeGeneration.current) return false;
+      await context.resume();
+      if (chime.current !== context) return false;
       const now = ctx.currentTime;
       [523.25, 659.25, 783.99].forEach((freq, idx) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+        const osc = context.createOscillator();
+        const gain = context.createGain();
         osc.type = 'sine';
         osc.frequency.setValueAtTime(freq, now + idx * 0.12);
         gain.gain.setValueAtTime(0.12, now + idx * 0.12);
         gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.12 + 0.4);
         osc.connect(gain);
-        gain.connect(ctx.destination);
+        gain.connect(context.destination);
         osc.start(now + idx * 0.12);
         osc.stop(now + idx * 0.12 + 0.45);
       });
+      await new Promise<void>((resolve) => setTimeout(resolve, 800));
+      return true;
     } catch (err) {
-      console.warn('Speaker test error:', err);
+      if (generation === chimeGeneration.current)
+        setSpeakerError(err instanceof Error ? err.message : 'Speaker test failed. Check the selected output device.');
+      return false;
+    } finally {
+      if (ctx) await ctx.close().catch(() => {});
+      if (chime.current === ctx) chime.current = null;
     }
   };
 
@@ -126,6 +154,7 @@ export function useAudioDevices() {
     permissionGranted,
     permissionDenied,
     permissionError,
+    speakerError,
     testSpeaker,
   };
 }

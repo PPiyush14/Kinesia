@@ -143,20 +143,27 @@ def list_user_rooms(user_id: str) -> list[dict[str, Any]]:
     with get_db() as db:
         rows = db.fetchall(
             """
-            SELECT DISTINCT r.id, r.room_code, r.title, r.record_session, r.is_active, r.created_at, r.ended_at
+            SELECT DISTINCT r.id, r.room_code, r.title, r.host_id, r.passcode_hash,
+                            r.record_session, r.is_active, r.created_at, r.ended_at
             FROM rooms r
             LEFT JOIN room_participants p ON r.id = p.room_id
-            WHERE r.host_id = ? OR p.user_id = ?
+            WHERE (r.host_id = ? OR p.user_id = ?)
+              AND NOT EXISTS (SELECT 1 FROM room_history_hidden h
+                              WHERE h.room_id = r.id AND h.user_id = ?)
             ORDER BY r.created_at DESC
             LIMIT 50
             """,
-            (user_id, user_id),
+            (user_id, user_id, user_id),
         )
     return [
         {
             "id": r["id"],
             "room_code": r["room_code"],
             "title": r["title"],
+            "host_id": r["host_id"],
+            "is_host": str(r["host_id"]) == str(user_id),
+            "has_passcode": bool(r.get("passcode_hash")),
+            "passcode_required": bool(r.get("passcode_hash")),
             "record_session": bool(r.get("record_session")),
             "is_active": bool(r.get("is_active")),
             "status": "live" if bool(r.get("is_active")) else "ended",
@@ -179,6 +186,7 @@ def add_participant(
     now = time.time()
     with get_db() as db:
         # Close any lingering prior open entry for this user in this room
+        db.execute("DELETE FROM room_history_hidden WHERE room_id = ? AND user_id = ?", (room_id, user_id))
         db.execute(
             "UPDATE room_participants SET left_at = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
             (now, room_id, user_id),
@@ -455,41 +463,31 @@ def is_room_member(room_id: str, user_id: str) -> bool:
 
 
 def clear_room_transcripts(room_id: str) -> None:
-    """Delete all transcripts for a room."""
+    """Clear shared text and its derived notes together, preserving the room."""
     with get_db() as db:
-        db.execute("DELETE FROM transcripts WHERE room_id = ?", (room_id,))
-
-
-def delete_room(room_code_or_id: str) -> bool:
-    """Permanently delete a room, its participants, transcripts, and insights."""
-    room = get_room_by_code(room_code_or_id)
-    if room is None:
-        with get_db() as db:
-            room = db.fetchone("SELECT id FROM rooms WHERE id = ?", (room_code_or_id,))
-    if not room:
-        return False
-    room_id = room["id"]
-    with get_db() as db:
-        db.execute("DELETE FROM room_participants WHERE room_id = ?", (room_id,))
         db.execute("DELETE FROM transcripts WHERE room_id = ?", (room_id,))
         db.execute("DELETE FROM session_insights WHERE room_id = ?", (room_id,))
-        db.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
-    return True
 
 
-def clear_all_rooms(host_id: str | None = None) -> int:
-    """Clear all past rooms or all rooms belonging to a host."""
+def hide_room_from_history(room_id: str, user_id: str) -> None:
+    """Keep the shared conversation intact while removing this user's list entry."""
     with get_db() as db:
-        if host_id:
-            cursor = db.execute("SELECT id FROM rooms WHERE host_id = ?", (str(host_id),))
-        else:
-            cursor = db.execute("SELECT id FROM rooms")
-        rows = cursor.fetchall()
-        for row in rows:
-            rid = row["id"] if isinstance(row, dict) else row[0]
-            db.execute("DELETE FROM room_participants WHERE room_id = ?", (rid,))
-            db.execute("DELETE FROM transcripts WHERE room_id = ?", (rid,))
-            db.execute("DELETE FROM session_insights WHERE room_id = ?", (rid,))
-            db.execute("DELETE FROM rooms WHERE id = ?", (rid,))
-        return len(rows)
+        db.execute(
+            """INSERT INTO room_history_hidden (room_id, user_id, hidden_at)
+               VALUES (?, ?, ?) ON CONFLICT (room_id, user_id)
+               DO UPDATE SET hidden_at=excluded.hidden_at""",
+            (room_id, user_id, time.time()),
+        )
 
+
+def hide_all_room_history(user_id: str) -> None:
+    """Hide all accessible rooms, including joined rooms beyond the list limit."""
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO room_history_hidden (room_id, user_id, hidden_at)
+               SELECT r.id, ?, ? FROM rooms r
+               WHERE r.host_id = ? OR EXISTS (
+                   SELECT 1 FROM room_participants p WHERE p.room_id = r.id AND p.user_id = ?)
+               ON CONFLICT (room_id, user_id) DO UPDATE SET hidden_at=excluded.hidden_at""",
+            (user_id, time.time(), user_id, user_id),
+        )

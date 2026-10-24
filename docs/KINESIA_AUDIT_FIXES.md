@@ -1,5 +1,63 @@
 # Kinesia pipeline audit and fixes
 
+## Follow-up: working checkpoint and conversation workflow fixes
+
+The user confirmed the deployed speech recognition, translation and voice quality
+worked substantially better. The exact code baseline is preserved remotely as
+`checkpoint/working-realtime-2026-10-24` at commit `40b0b14`. This Git checkpoint
+covers code and committed assets; private Render environment values and database
+contents are not stored in Git. No production database operations were performed.
+
+Confirmed follow-up defects and fixes:
+
+- `list_user_rooms` omitted `host_id`, making a returning creator appear as a
+  guest when reopening a room from history. List results now retain the persisted
+  creator ID, caller's host role, and passcode flag without exposing the hash.
+- Deleting a history entry called shared-room deletion, while clear-all deleted
+  hosted rooms but only temporarily emptied a guest's UI. Both existing DELETE
+  routes now remove only the caller's history entries. A small additive
+  `room_history_hidden` table stores that preference; shared transcripts, notes,
+  membership, host authority and live calls remain intact. Explicit rejoining
+  restores that caller's entry. Clear-all covers entries beyond the display limit.
+- Starting local speech automatically reset incoming translated audio. Capture
+  and playback now remain full-duplex; output mute and disconnect still cancel
+  playback. The bounded eight-second overload policy remains, with a visible
+  warning; this is not a promise that overload cannot skip audio.
+- Finalized sentence punctuation required a trailing space to trigger TTS. Speech
+  can now start from a completed finalized sentence immediately. A short greeting
+  no longer prevents a following stable sentence from being released. STT model,
+  endpoint settings, Cartesia voice, speed and emotion settings were not changed.
+- Late notes/history requests could overwrite the newly selected conversation.
+  Generation checks ignore superseded responses and requests after unmount.
+- The lobby's speaker-test button synthesized two chimes and ignored the output
+  device. It now uses one routed chime, closes its AudioContext and reports an
+  unsupported output selection instead of pretending it worked.
+- Gender/voice selection was removed from signup and profile; the active Cartesia
+  path did not use it. Existing optional database fields remain for compatibility.
+- Shared transcript clearing is host-only, explicitly affects everyone, and also
+  invalidates saved derived notes. Personal history removal is a separate action.
+- The caption toggle says "Show original text". Hardcoded "Engine: Online" was
+  removed, language counts derive from supported languages, and notes use general
+  conversation/follow-up wording. No LLM recap or speculative new feature was added.
+- Removed unused frontend imports/state and unreferenced shared-room deletion
+  helpers. Strict unused-code checks are enabled. The typecheck command now checks
+  the referenced TypeScript projects instead of an empty root project.
+
+Regression coverage includes the returning-host flow, individual and bulk history
+privacy, active-call preservation, rejoin restoration, old-response races, stable
+sentence release, full-duplex playback, and selected-device chime lifecycle.
+Actual deployed latency improvement still needs the user's next Render call test.
+
+Follow-up verification: 98 backend tests, 17 frontend unit regressions, and eight
+Chrome browser scenarios passed. Strict TypeScript/Vite production build passed;
+`npm audit` reported zero vulnerabilities; backend undefined-name and duplicate-
+definition checks passed. The synthetic English-to-Hindi live provider smoke test
+passed with the original speech settings. The one Starlette test-adapter
+deprecation warning remains. These checks do not constitute an end-to-end latency
+benchmark or a PostgreSQL production deployment test.
+
+## Earlier audit snapshot
+
 Provider decision after this audit: use Soniox for recognition/native speech
 translation and Cartesia for speech output, preserving the current UI colours.
 The provider migration is now implemented. The current meeting UI streams

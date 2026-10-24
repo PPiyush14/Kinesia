@@ -1,25 +1,21 @@
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   ArrowLeft,
   Mic,
   MicOff,
   Volume2,
-  Radio,
   ArrowRight,
   Copy,
   Check,
-  ShieldCheck,
   Headphones,
-  Sparkles,
 } from 'lucide-react';
 import type { Room } from '@/types';
-import { SUPPORTED_LANGUAGES, langLabel } from '@/types';
+import { SUPPORTED_LANGUAGES } from '@/types';
 import { useAudioMeter } from '@/hooks/useAudioMeter';
 import { useAudioDevices } from '@/hooks/useAudioDevices';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
-import { Badge } from '@/components/ui/Badge';
 import { Card, CardContent } from '@/components/ui/Card';
 
 interface LobbyViewProps {
@@ -53,7 +49,7 @@ export function LobbyView({
     changeOutput,
     testSpeaker,
     permissionDenied,
-    permissionError,
+    speakerError,
     requestPermission,
   } = useAudioDevices();
   const { level, ready, error: meterError } = useAudioMeter(micEnabled, selectedInput);
@@ -70,30 +66,11 @@ export function LobbyView({
     }
   };
 
-  // Play a pleasant synthesizer test chime to test audio output
-  const testAudioOutput = () => {
+  const testAudioOutput = async () => {
+    setPlayingTestAudio(true);
     try {
-      setPlayingTestAudio(true);
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AudioCtx();
-      const now = ctx.currentTime;
-
-      // Play 3 harmonic chords (C-E-G)
-      [523.25, 659.25, 783.99].forEach((freq, idx) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(freq, now + idx * 0.12);
-        gain.gain.setValueAtTime(0.12, now + idx * 0.12);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.12 + 0.4);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now + idx * 0.12);
-        osc.stop(now + idx * 0.12 + 0.45);
-      });
-
-      setTimeout(() => { setPlayingTestAudio(false); void ctx.close(); }, 800);
-    } catch {
+      await testSpeaker(selectedOutput);
+    } finally {
       setPlayingTestAudio(false);
     }
   };
@@ -223,10 +200,8 @@ export function LobbyView({
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => {
-                    testSpeaker(selectedOutput);
-                    testAudioOutput();
-                  }}
+                  onClick={() => void testAudioOutput()}
+                  disabled={playingTestAudio}
                   leftIcon={<Volume2 size={14} className={playingTestAudio ? 'text-accent animate-bounce' : ''} />}
                   className="text-xs text-ink-secondary"
                 >
@@ -234,6 +209,7 @@ export function LobbyView({
                 </Button>
               </div>
 
+              {speakerError && <p role="alert" className="text-xs text-danger">{speakerError}</p>}
               {outputs.length > 0 && (
                 <Select
                   label="Select Speaker Device"

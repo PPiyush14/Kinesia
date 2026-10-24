@@ -159,7 +159,7 @@ def test_new_subscription_survives_old_socket_cleanup(realtime_client):
             assert receive_event(current, "pong") == "still-here"
 
 
-def test_delete_routes_are_not_shadowed_and_only_host_can_remove_room(realtime_client):
+def test_history_removal_does_not_delete_shared_rooms_and_account_route_still_works(realtime_client):
     client = realtime_client
     _, headers = user(client, "delete_host")
     _, other_headers = user(client, "delete_guest")
@@ -170,7 +170,8 @@ def test_delete_routes_are_not_shadowed_and_only_host_can_remove_room(realtime_c
     assert client.delete(f"/api/v1/rooms/{code}/transcripts", headers=headers).status_code == 200
     assert client.get(f"/api/v1/rooms/{code}").status_code == 200
     assert client.delete(f"/api/v1/rooms/{code}", headers=headers).status_code == 200
-    assert client.get(f"/api/v1/rooms/{code}").status_code == 404
+    assert client.get(f"/api/v1/rooms/{code}").status_code == 200
+    assert client.get("/api/v1/rooms", headers=headers).json()["data"] == []
     assert client.delete("/api/v1/auth/profile", headers=other_headers).status_code == 200
     assert client.get("/api/v1/auth/me", headers=other_headers).status_code == 401
 
@@ -195,7 +196,7 @@ def test_repeated_disconnect_releases_sessions_and_membership(realtime_client):
         assert client.get(f"/api/v1/rooms/{code}/participants", headers=headers).json()["data"] == []
 
 
-def test_clearing_host_rooms_ends_active_streams_but_preserves_other_hosts(realtime_client):
+def test_clearing_history_preserves_active_streams_and_other_users_history(realtime_client):
     client = realtime_client
     token, headers = user(client, "clear_host")
     _, other_headers = user(client, "remaining_host")
@@ -204,9 +205,34 @@ def test_clearing_host_rooms_ends_active_streams_but_preserves_other_hosts(realt
     with client.websocket_connect(f"/ws/rooms/{code}") as socket:
         authenticate(socket, token)
         assert client.delete("/api/v1/rooms/clear-all", headers=headers).status_code == 200
-        assert receive_event(socket, "session_ended")["summary_method"] == "extractive"
-    assert client.get(f"/api/v1/rooms/{code}").status_code == 404
+        socket.send_json({"type": "ping", "data": "still-live"})
+        assert receive_event(socket, "pong") == "still-live"
+        assert client.get("/api/v1/rooms", headers=headers).json()["data"] == []
+    assert client.get(f"/api/v1/rooms/{code}").status_code == 200
     assert client.get(f"/api/v1/rooms/{other_code}").status_code == 200
+
+
+def test_owner_rejoins_after_guest_and_can_still_end_the_room(realtime_client):
+    client = realtime_client
+    host, headers = user(client, "returning_owner")
+    guest, guest_headers = user(client, "arrived_first")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Return to my room"}).json()["data"]["room_code"]
+    with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+        authenticate(socket, host)
+    with client.websocket_connect(f"/ws/rooms/{code}") as listener:
+        authenticate(listener, guest)
+        entry = client.get("/api/v1/rooms", headers=headers).json()["data"][0]
+        assert entry["host_id"] == client.get("/api/v1/auth/me", headers=headers).json()["data"]["id"]
+        assert entry["is_host"]
+        assert client.post(f"/api/v1/rooms/{code}/end", headers=guest_headers, json={}).status_code == 403
+        assert client.delete(f"/api/v1/rooms/{code}/transcripts", headers=guest_headers).status_code == 403
+        assert client.delete(f"/api/v1/rooms/{code}", headers=guest_headers).status_code == 200
+        assert client.get("/api/v1/rooms", headers=guest_headers).json()["data"] == []
+        assert len(client.get("/api/v1/rooms", headers=headers).json()["data"]) == 1
+        with client.websocket_connect(f"/ws/rooms/{code}") as returning:
+            authenticate(returning, host)
+            assert client.post(f"/api/v1/rooms/{code}/end", headers=headers, json={}).status_code == 200
+            receive_event(listener, "session_concluded")
 
 
 def test_failed_stream_setup_does_not_leave_a_ghost_participant(realtime_client):

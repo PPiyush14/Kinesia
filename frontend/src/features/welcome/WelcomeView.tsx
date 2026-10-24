@@ -62,7 +62,6 @@ const features = [
 export function WelcomeView({
   user: initialUser,
   onStartConversation,
-  onJoinWithCode,
   onOpenWorkspace,
   onOpenProfile,
 }: WelcomeViewProps) {

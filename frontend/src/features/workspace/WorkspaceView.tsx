@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Plus, LogIn, RefreshCw, Shield, Clock, Users, ArrowRight, ArrowLeft } from 'lucide-react';
+import { Plus, LogIn, RefreshCw, Clock, Users, ArrowRight, ArrowLeft } from 'lucide-react';
 import { roomService } from '@/services/api';
 import type { Room } from '@/types';
 import { Button } from '@/components/ui/Button';

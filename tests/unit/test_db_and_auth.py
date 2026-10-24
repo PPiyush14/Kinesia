@@ -19,6 +19,10 @@ from backend.db.rooms import (
     get_room_transcripts,
     get_session_insights,
     list_active_participants,
+    list_user_rooms,
+    hide_room_from_history,
+    hide_all_room_history,
+    clear_room_transcripts,
     save_session_insights,
     verify_room_access,
 )
@@ -144,3 +148,56 @@ def test_room_lifecycle_and_access_control() -> None:
     # 6. End room
     ended = end_room(code)
     assert ended["ended_at"] is not None
+
+
+def test_history_metadata_keeps_creator_identity_after_leaving():
+    host = register_user("owner", "owner@example.com", "pass123")
+    room = create_room("Persistent host", host["id"], passcode="room-pass")
+    entry = list_user_rooms(host["id"])[0]
+    assert entry["host_id"] == host["id"]
+    assert entry["is_host"] is True
+    assert entry["passcode_required"] is True
+    assert "passcode_hash" not in entry
+
+
+def test_room_history_removal_is_private_idempotent_and_rejoin_restores_it():
+    host = register_user("history_host", "history_host@example.com", "pass123")
+    guest = register_user("history_guest", "history_guest@example.com", "pass123")
+    room = create_room("Shared conversation", host["id"])
+    add_participant(room["id"], guest["id"], "Guest")
+    add_transcript(room["id"], host["id"], "Host", "Keep this transcript.", "en", {"hi": "translation"})
+    hide_room_from_history(room["id"], guest["id"])
+    hide_room_from_history(room["id"], guest["id"])
+    assert list_user_rooms(guest["id"]) == []
+    assert len(list_user_rooms(host["id"])) == 1
+    assert len(get_room_transcripts(room["id"])) == 1
+    assert get_room_by_code(room["room_code"])["is_active"]
+    add_participant(room["id"], guest["id"], "Guest again")
+    assert len(list_user_rooms(guest["id"])) == 1
+    hide_all_room_history(host["id"])
+    assert list_user_rooms(host["id"]) == []
+    assert len(list_user_rooms(guest["id"])) == 1
+    assert len(get_room_transcripts(room["id"])) == 1
+
+
+def test_clear_history_hides_joined_rooms_beyond_the_fifty_entry_display_limit():
+    host = register_user("many_host", "many_host@example.com", "pass123")
+    guest = register_user("many_guest", "many_guest@example.com", "pass123")
+    for index in range(52):
+        room = create_room(f"Conversation {index}", host["id"])
+        add_participant(room["id"], guest["id"], "Guest")
+    assert len(list_user_rooms(guest["id"])) == 50
+    hide_all_room_history(guest["id"])
+    assert list_user_rooms(guest["id"]) == []
+    assert len(list_user_rooms(host["id"])) == 50
+
+
+def test_clearing_shared_transcript_also_invalidates_its_saved_notes():
+    host = register_user("clear_notes", "clear_notes@example.com", "pass123")
+    room = create_room("Clear shared text", host["id"])
+    add_transcript(room["id"], host["id"], "Host", "A private sentence.", "en", {})
+    save_session_insights(room["id"], "A private sentence.", [], [], {})
+    clear_room_transcripts(room["id"])
+    assert get_room_transcripts(room["id"]) == []
+    assert get_session_insights(room["id"]) is None
+    assert get_room_by_code(room["room_code"]) is not None

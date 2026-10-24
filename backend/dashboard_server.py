@@ -35,8 +35,8 @@ from backend.db.rooms import (
     create_room,
     get_room_by_code,
     clear_room_transcripts,
-    delete_room,
-    clear_all_rooms,
+    hide_room_from_history,
+    hide_all_room_history,
     is_room_member,
     get_room_transcripts,
     get_session_insights,
@@ -1524,9 +1524,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if not user:
                 self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
                 return
-            self.state.coordinator.remove_hosted_cached_rooms(user["id"])
-            clear_all_rooms(user["id"])
-            self._send_v1_json({"ok": True, "message": "All rooms cleared"})
+            hide_all_room_history(user["id"])
+            self._send_v1_json({"ok": True, "message": "Your room history was cleared. Shared conversations are unchanged."})
             return
 
         if path.startswith("/api/v1/rooms/"):
@@ -1542,8 +1541,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not user:
                     self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
                     return
-                if not is_room_member(room["id"], user["id"]):
-                    self._send_v1_error("Forbidden: Only participants can clear room logs", status=HTTPStatus.FORBIDDEN)
+                if str(room["host_id"]) != str(user["id"]):
+                    self._send_v1_error("Only the host can clear the shared transcript", status=HTTPStatus.FORBIDDEN)
                     return
                 try:
                     self.state.coordinator.clear_transcripts(
@@ -1565,12 +1564,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not room:
                     self._send_v1_error("Room not found", status=HTTPStatus.NOT_FOUND)
                     return
-                if str(room["host_id"]) != str(user["id"]):
-                    self._send_v1_error("Only the host can delete this room", status=HTTPStatus.FORBIDDEN)
+                if not is_room_member(room["id"], user["id"]):
+                    self._send_v1_error("Only participants can remove this room from their history", status=HTTPStatus.FORBIDDEN)
                     return
-                self.state.coordinator.remove_cached_room(room_code)
-                delete_room(room_code)
-                self._send_v1_json({"ok": True, "message": "Room deleted"})
+                hide_room_from_history(room["id"], user["id"])
+                self._send_v1_json({"ok": True, "message": "Room removed from your history. Other participants keep their copy."})
                 return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")

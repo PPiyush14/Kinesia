@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   FileText,
   Clock,
-  Users,
   Copy,
   Download,
   ArrowRight,
@@ -44,6 +43,7 @@ export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryView
   const [clearingLogs, setClearingLogs] = useState(false);
   const [clearingAll, setClearingAll] = useState(false);
   const [deletingCode, setDeletingCode] = useState<string | null>(null);
+  const detailsRequest = useRef(0);
 
   const fetchRooms = async () => {
     setLoading(true);
@@ -60,9 +60,11 @@ export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryView
 
   useEffect(() => {
     void fetchRooms();
+    return () => { detailsRequest.current++; };
   }, []);
 
   const handleSelectSession = async (room: Room) => {
+    const request = ++detailsRequest.current;
     setSelectedRoom(room);
     setLoadingDetails(true);
     setInsights(null);
@@ -74,6 +76,7 @@ export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryView
         roomService.getTranscripts(room.room_code),
       ]);
 
+      if (request !== detailsRequest.current) return;
       if (ins.status === 'fulfilled' && ins.value) {
         setInsights(ins.value);
       }
@@ -83,7 +86,7 @@ export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryView
     } catch (err) {
       console.error('Error loading session details', err);
     } finally {
-      setLoadingDetails(false);
+      if (request === detailsRequest.current) setLoadingDetails(false);
     }
   };
 
@@ -94,11 +97,12 @@ export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryView
       await roomService.deleteRoom(roomCode);
       setRooms((prev) => prev.filter((r) => r.room_code !== roomCode));
       if (selectedRoom?.room_code === roomCode) {
+        detailsRequest.current++;
         setSelectedRoom(null);
         setInsights(null);
         setTranscripts([]);
       }
-      onToast(`Session ${roomCode} deleted from history`, 'success');
+      onToast(`Session ${roomCode} removed from your history`, 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Failed to delete session', 'error');
     } finally {
@@ -110,6 +114,7 @@ export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryView
     setClearingAll(true);
     try {
       await roomService.clearAllRooms();
+      detailsRequest.current++;
       setRooms([]);
       setSelectedRoom(null);
       setInsights(null);
@@ -125,12 +130,16 @@ export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryView
 
   const handleClearTranscripts = async () => {
     if (!selectedRoom) return;
+    const request = detailsRequest.current;
     setClearingLogs(true);
     try {
       await roomService.clearTranscripts(selectedRoom.room_code);
-      setTranscripts([]);
-      setShowClearModal(false);
-      onToast('Conversation logs cleared for this session', 'success');
+      if (request === detailsRequest.current) {
+        setTranscripts([]);
+        setInsights(null);
+        setShowClearModal(false);
+      }
+      onToast('Shared transcript and saved notes cleared', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Failed to clear logs', 'error');
     } finally {
@@ -160,8 +169,8 @@ ${summary}
 ## Key Discussion Points
 ${keys.length > 0 ? keys.map((k) => `- ${k}`).join('\n') : 'No key points recorded.'}
 
-## Next Steps & Action Items
-${actions.length > 0 ? actions.map((a) => `- [ ] ${a}`).join('\n') : 'No action items recorded.'}
+## Possible Follow-ups
+${actions.length > 0 ? actions.map((a) => `- [ ] ${a}`).join('\n') : 'No follow-ups recorded.'}
 
 ## Dialogue Turns (${transcripts.length})
 ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.original_text}`).join('\n\n')}
@@ -293,7 +302,7 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
                         type="button"
                         onClick={(e) => void handleDeleteRoom(room.room_code, e)}
                         className="p-1 rounded-md text-ink-muted hover:text-danger hover:bg-danger/10 transition-colors"
-                        title="Delete this session from history"
+                        title="Remove this session from my history"
                         disabled={deletingCode === room.room_code}
                       >
                         <Trash2 size={13} className={deletingCode === room.room_code ? 'animate-pulse' : ''} />
@@ -326,7 +335,7 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
               </div>
               <h3 className="font-semibold text-sm text-ink-primary">Select a Session</h3>
               <p className="text-xs text-ink-muted max-w-sm mx-auto">
-                Click any session from the list on the left to view its executive summary, key points, action items, and complete transcripts.
+                Choose a conversation to review its notes, highlights, possible follow-ups, and saved transcript.
               </p>
             </Card>
           ) : loadingDetails ? (
@@ -371,16 +380,17 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
                       onClick={() => void handleDeleteRoom(selectedRoom.room_code)}
                       leftIcon={<Trash2 size={13} className="text-danger" />}
                       className="text-danger hover:bg-danger/10"
-                      title="Permanently delete this session"
+                      title="Remove from your history; other participants keep their copy"
                     >
-                      Delete
+                      Remove from my history
                     </Button>
                     <Button
                       variant="secondary"
                       size="sm"
                       onClick={() => setShowClearModal(true)}
+                      disabled={!selectedRoom.is_host}
                       leftIcon={<Trash2 size={13} />}
-                      title="Clear recorded logs for this session"
+                      title="Only the host can clear the shared transcript for everyone"
                     >
                       Clear Logs
                     </Button>
@@ -402,7 +412,7 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
                 <CardHeader className="border-b border-border-subtle p-4 flex items-center gap-2">
                   <Sparkles size={16} className="text-accent" />
                   <h3 className="text-xs font-semibold text-ink-primary uppercase tracking-wider">
-                    Executive Summary
+                    Conversation overview
                   </h3>
                 </CardHeader>
                 <CardContent className="p-4">
@@ -418,7 +428,7 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
                   <CardHeader className="border-b border-border-subtle p-4 flex items-center gap-2">
                     <CheckCircle2 size={16} className="text-accent-cyan" />
                     <h3 className="text-xs font-semibold text-ink-primary uppercase tracking-wider">
-                      Action Items ({insights.action_items.length})
+                      Possible follow-ups ({insights.action_items.length})
                     </h3>
                   </CardHeader>
                   <CardContent className="p-4 space-y-2">
@@ -443,7 +453,7 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
                       Dialogue Turns ({transcripts.length})
                     </h3>
                   </div>
-                  {transcripts.length > 0 && (
+                  {transcripts.length > 0 && selectedRoom.is_host && (
                     <button
                       type="button"
                       onClick={() => setShowClearModal(true)}
@@ -494,7 +504,7 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
                 </div>
               </div>
               <p className="text-xs text-ink-secondary leading-relaxed">
-                This will permanently delete all recorded dialogue turns for <strong>{selectedRoom.title}</strong>. Only participants of this room have access to these logs.
+                This clears the shared transcript and saved notes of <strong>{selectedRoom.title}</strong> for every participant. To remove only your history entry, use Remove from my history instead.
               </p>
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-border-subtle">
                 <Button variant="secondary" size="sm" onClick={() => setShowClearModal(false)}>
@@ -528,11 +538,11 @@ ${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.origina
                 </div>
                 <div>
                   <h3 className="font-semibold text-sm text-ink-primary">Clear All Session History?</h3>
-                  <p className="text-2xs text-ink-muted">Permanently delete all sessions ({rooms.length})</p>
+                  <p className="text-2xs text-ink-muted">Remove your history entries ({rooms.length} shown)</p>
                 </div>
               </div>
               <p className="text-xs text-ink-secondary leading-relaxed">
-                This will permanently delete all past rooms, transcripts, and conversation notes from your account. This action cannot be undone.
+                This removes rooms from your history only. Other participants keep their history, transcripts and notes, and active conversations continue. Rejoining a room adds it back to your history.
               </p>
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-border-subtle">
                 <Button variant="secondary" size="sm" onClick={() => setShowClearAllModal(false)}>

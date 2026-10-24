@@ -760,7 +760,7 @@ class RoomCoordinator:
         )
 
     def conclude_session(self, room_code: str) -> dict[str, Any]:
-        """Conclude a room session, generate MoM/AI Insights, and notify all members."""
+        """End a conversation, save its notes, and notify all participants."""
         clean_code = room_code.strip().lower()
         room = self.get_or_load_room(clean_code)
         if not room:
@@ -782,7 +782,7 @@ class RoomCoordinator:
         end_room(clean_code)
 
         if not room.record_session:
-            executive_summary = f"Session '{room.title}' concluded. Recording was disabled for this dialogue, so no transcripts or MoM were persisted."
+            executive_summary = f"Conversation '{room.title}' ended. Saving was disabled, so no transcript or conversation notes were stored."
             insights_data = {
                 "room_id": room.room_id,
                 "executive_summary": executive_summary,

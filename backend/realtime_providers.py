@@ -86,8 +86,10 @@ class TranscriptBuffer:
             return ""
         # Never send replaceable partial tokens to TTS. Prefer complete clauses;
         # limit long stable passages without cutting a word in half.
-        boundary = re.search(r"[.!?।](?:\s+)", pending)
-        end = boundary.end() if boundary and len(pending[:boundary.end()].strip()) >= 12 else 0
+        # A finalized sentence needs no trailing space before synthesis. A short
+        # greeting must not block the following complete sentence, either.
+        end = next((boundary.end() for boundary in re.finditer(r"[.!?।](?:\s+|$)", pending)
+                    if len(pending[:boundary.end()].strip()) >= 12), 0)
         if not end and len(pending) >= 180:
             end = pending.rfind(" ", 0, 180)
         if final:
