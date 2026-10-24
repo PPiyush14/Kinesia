@@ -313,6 +313,35 @@ def test_new_speech_after_reconnect_does_not_overwrite_previous_turn(realtime_cl
     assert len(history) == 2 and history[0]["id"] != history[1]["id"]
 
 
+def test_recap_resolves_model_references_to_saved_hindi_sources_and_caches_the_result(realtime_client):
+    import httpx
+
+    from backend.db.rooms import add_transcript
+    from tests.unit.test_conversation_features import referenced_result
+
+    client = realtime_client
+    _, headers = user(client, "hindi_recap")
+    room = client.post("/api/v1/rooms", headers=headers, json={"title": "A Hindi conversation"}).json()["data"]
+    turn = add_transcript(room["id"], room["host_id"], "Host", "कल शाम छह बजे मिलेंगे, पाँच बजे नहीं।", "hi", {})
+    requests = []
+    def handler(request):
+        requests.append(request)
+        reply = referenced_result("They agreed to meet at six, not five.", ["wrong"] if len(requests) == 1 else ["p1"])
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(reply)}}]})
+    client.app.state.recaps.generator.client_factory = lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler))
+    code = room["room_code"]
+    path = f"/api/v1/rooms/{code}/recap"
+    assert client.post(f"/api/v1/rooms/{code}/end", headers=headers, json={}).status_code == 200
+    assert client.post(path, headers=headers, json={"language": "en"}).status_code == 200
+    client.app.state.recaps.pool.submit(lambda: None).result(3)
+    ready = client.get(path, headers=headers).json()["data"]
+    assert ready["status"] == "ready"
+    assert ready["result"]["summary"] == {"text": "They agreed to meet at six, not five.",
+                                          "source_ids": [turn["id"]], "evidence": turn["original_text"]}
+    assert client.post(path, headers=headers, json={"language": "en"}).json()["data"]["job_id"] == ready["job_id"]
+    assert len(requests) == 2
+
+
 def test_saving_disabled_cannot_create_moments_or_send_transcript_for_ai_recap(realtime_client):
     client = realtime_client
     token, headers = user(client, "no_saved_text")

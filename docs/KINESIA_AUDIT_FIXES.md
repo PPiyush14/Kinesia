@@ -1,5 +1,44 @@
 # Kinesia pipeline audit and fixes
 
+## Recap evidence reliability fix: 2026-10-25
+
+The deployed "recap evidence did not match the transcript" error came from a
+brittle generation contract: Groq had to summarize in the requested language
+while separately copying exact original-language quotes and source UUIDs.
+Schema-valid output could fail the evidence check, so the whole recap was
+discarded. The same error was reproduced with correctly encoded synthetic Hindi;
+the initial Windows stdin probe had an encoding problem and was excluded from
+the multilingual comparison.
+
+Groq now selects short passage references constrained to the current input in
+its JSON schema. The backend resolves those references to actual transcript
+turn IDs and exact original excerpts. It never accepts a model-written quote
+or invents a replacement citation. The public recap payload, source links,
+language controls, cache, database, and live speech pipeline are preserved.
+References remain bound to the same originals through every map/reduce stage.
+Invalid model references or oversized output receive one bounded automatic
+repair attempt; invalid results still fail. Source-deletion, restart, deadline,
+and rate-limit checks also apply before repair. Temporary passage data is
+released after success or failure.
+
+The corrected four-case live comparison included Hindi-to-English,
+Hindi-to-Hindi, everyday self-correction, and mixed-language input. The old
+generator failed its evidence check on the Hindi-output case; the new generator
+passed all four cases. Separate on-disk Hindi-source probes passed for Hindi
+(1,812 ms) and English (1,390 ms) output. These are synthetic smoke tests, not
+success-rate or semantic-accuracy guarantees. No production conversations or
+database were accessed. The probe script now supports `--source-language hi`
+and `--source-language mixed`, so multilingual checks do not depend on shell
+encoding. Browser regressions for recap display/source navigation, retry, and
+stale responses passed (three scenarios).
+
+Final verification: **124 backend tests passed** (54.57 seconds, one existing
+Starlette/httpx adapter deprecation warning), including 19 recap/floor unit tests
+and the authenticated API regression exercising real reference resolution,
+automatic repair, exact Hindi evidence, and cache reuse. Ruff and Git whitespace
+checks passed. The frontend source/assets did not change in this backend fix;
+the three relevant browser scenarios passed against the existing UI.
+
 ## Speaking-rate adjustment: 2026-10-25
 
 Raised the Cartesia speaking-rate default from `1.0` to `1.1`, and updated the

@@ -13,6 +13,7 @@ from backend.conversation_recap import (
     GroqRecapGenerator,
     RecapError,
     RecapService,
+    source_passages,
     validate_recap,
 )
 from backend.db.auth import register_user
@@ -29,6 +30,107 @@ from backend.db.rooms import (
 def result(text="Tomorrow at six, not five.", identifier="one"):
     return {"summary": {"text": text, "source_ids": [identifier], "evidence": text},
             "highlights": [], "follow_ups": [], "open_questions": []}
+
+
+def referenced_result(text="Tomorrow at six, not five.", references=None):
+    return {"summary": {"text": text, "source_refs": references if references is not None else ["p1"]},
+            "highlights": [], "follow_ups": [], "open_questions": []}
+
+
+def test_cross_language_recap_attaches_exact_original_evidence_instead_of_model_copied_quotes(sample_config):
+    original = "कल शाम छह बजे मिलेंगे, पाँच बजे नहीं।"
+    seen = []
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps(referenced_result("They agreed to meet at six, not five."))}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    output = generator.generate([{"id": "actual-hindi-turn", "speaker_name": "A", "original_text": original}], "en")
+    assert output["summary"] == {"text": "They agreed to meet at six, not five.",
+                                 "source_ids": ["actual-hindi-turn"], "evidence": original}
+    point_schema = seen[0]["response_format"]["json_schema"]["schema"]["properties"]["summary"]
+    assert point_schema["properties"]["source_refs"]["items"]["enum"] == ["p1"]
+    assert "evidence" not in point_schema["properties"]
+    assert generator.passages == {}
+
+
+@pytest.mark.parametrize("references", [[], ["invented"], [None], [["p1"]]])
+def test_invalid_model_references_retry_once_then_fail_without_inventing_a_source(sample_config, references):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps(referenced_result(references=references))}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(RecapError):
+        generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Tomorrow at six, not five."}], "en")
+    assert len(requests) == 2
+    assert generator.passages == {}
+
+
+def test_invalid_model_reference_is_repaired_automatically_within_the_same_job(sample_config):
+    requests = []
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        reply = referenced_result(references=["wrong"] if len(requests) == 1 else ["p1"])
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(reply)}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    output = generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Tomorrow at six, not five."}], "en")
+    assert output == result()
+    assert len(requests) == 2
+    assert "source_refs" in requests[1]["messages"][-1]["content"]
+
+
+def test_long_multilingual_recap_reduction_keeps_source_bindings_and_complete_input(sample_config):
+    turns = [
+        {"id": "first-real-uuid", "speaker_name": "A", "original_text": "Earlier context and details. " * 100},
+        {"id": "second-real-uuid", "speaker_name": "B", "original_text": "More details from the other person. " * 75},
+        {"id": "last-real-uuid", "speaker_name": "A", "original_text": "Final correction: 42, not 24. हाँ, बयालीस।"},
+    ]
+    mapped, merged = [], []
+    def handler(request):
+        payload = json.loads(request.content)
+        content = json.loads(payload["messages"][1]["content"])
+        (merged if "notes" in content else mapped).append(content)
+        passages = content["passages"]
+        chosen = next((item for item in passages if "Final correction" in item["text"]), passages[0])
+        schema = payload["response_format"]["json_schema"]["schema"]
+        assert schema["properties"]["summary"]["properties"]["source_refs"]["items"]["enum"] == [item["ref"] for item in passages]
+        reply = referenced_result("The final corrected number is 42." if "Final correction" in chosen["text"] else "Earlier discussion.", [chosen["ref"]])
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(reply)}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    output = generator.generate(turns, "en")
+    assert len(mapped) >= 2 and merged
+    assert "".join("".join(item["text"].split()) for batch in mapped for item in batch["passages"]) == "".join("".join(turn["original_text"].split()) for turn in turns)
+    assert output["summary"]["source_ids"] == ["last-real-uuid"]
+    assert output["summary"]["evidence"] == turns[-1]["original_text"]
+
+
+def test_source_excerpt_splitting_preserves_unicode_punctuation_numbers_and_negation():
+    text = ('हाँ। “छह” बजे, पाँच नहीं! café\u0301 १२३ forty-two ' * 35) + ('无空格文字' * 90)
+    passages = list(source_passages(text))
+    assert len(passages) > 2
+    assert all(passage in text and len(passage) <= 280 for passage in passages)
+    assert "".join("".join(passage.split()) for passage in passages) == "".join(text.split())
+
+
+def test_auto_repair_rechecks_source_deletion_before_sending_another_request(sample_config):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps(referenced_result(references=["invented"]))}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    generator.source_valid = lambda: not requests
+    with pytest.raises(RecapError, match="transcript changed"):
+        generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Do not resend after clearing."}], "en")
+    assert len(requests) == 1
 
 
 def test_recap_rejects_fabricated_citations_quotes_and_truncated_answers(sample_config):
@@ -53,7 +155,7 @@ def test_recap_request_uses_separate_key_structured_schema_and_untrusted_source_
     valid = result()
     def handler(request):
         seen.append(request)
-        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid)}}]})
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(referenced_result())}}]})
     config = replace(sample_config, groq_api_key="recap-only-secret")
     generator = GroqRecapGenerator(config, client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
     assert generator.generate([{"id": "one", "speaker_name": "A", "original_text": valid["summary"]["text"]}], "hi") == valid
@@ -71,7 +173,9 @@ def test_long_recap_processes_the_last_turn_instead_of_silently_truncating(sampl
     def summarize(data, sources, language, **kwargs):
         calls.append(data)
         identifier = "last" if "last" in json.dumps(data) else "one"
-        return result(sources[identifier], identifier)
+        reference = identifier + "-ref"
+        generator.passages[reference] = {"source_id": identifier, "text": sources[identifier][:120], "speaker": "A"}
+        return referenced_result(sources[identifier][:120], [reference])
     generator._call = summarize
     output = generator.generate([
         {"id": "one", "speaker_name": "A", "original_text": "Earlier words. " * 600},
@@ -91,7 +195,7 @@ def test_recap_rate_limit_retries_respect_provider_delay_and_auth_errors_are_san
         requests.append(request)
         if len(requests) == 1:
             return httpx.Response(429, headers={"retry-after": "3"})
-        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid)}}]})
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(referenced_result())}}]})
     config = replace(sample_config, groq_api_key="test-key")
     generator = GroqRecapGenerator(config, stopped=Stop(), client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
     turns = [{"id": "one", "speaker_name": "A", "original_text": valid["summary"]["text"]}]

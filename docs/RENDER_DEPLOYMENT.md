@@ -120,8 +120,10 @@ jobs and persisted status. Restarted jobs become retryable failures.
 Large transcripts are processed in batches rather than silently truncated.
 The current limit is 48 batches of roughly 5,500 UTF-8 bytes, with a generation
 deadline and explicit errors. Free-tier rate limits may delay or reject requests.
-Source IDs and exact quotes are validated; semantic accuracy still requires
-review. Saved-moment lists return up to 500 entries.
+Groq selects references to original passages; the backend attaches the actual
+transcript turn IDs and exact quotes. Unknown references are rejected, with one
+automatic repair attempt. Semantic accuracy still requires review. Saved-moment
+lists return up to 500 entries.
 
 The legacy insights endpoint retains extractive notes for API compatibility.
 Typed translation uses the existing Cartesia-to-Soniox voice bridge, which is
@@ -164,6 +166,7 @@ they do not access the database:
 ```sh
 python scripts/check_speech_providers.py --live --language hi --streaming
 python scripts/check_recap_provider.py --live --language hi
+python scripts/check_recap_provider.py --live --source-language hi --language en
 ```
 
 Observed on 2026-10-24: the streaming check preserved an intentional acknowledgement,
