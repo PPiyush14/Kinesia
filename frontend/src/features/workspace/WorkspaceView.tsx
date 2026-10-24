@@ -115,14 +115,14 @@ export function WorkspaceView({ defaultJoinCode, onSelectRoom, onToast, onBackTo
         <div className="absolute inset-0 bg-gradient-to-br from-accent/10 via-transparent to-accent-cyan/8 pointer-events-none" />
         <div className="relative z-10 max-w-xl space-y-3">
           <Badge tone="accent" dot>
-            Workspace
+            Conversations
           </Badge>
           <h1 className="font-display text-title sm:text-[2rem] text-ink-primary tracking-tight">
             Start a conversation that everyone understands
           </h1>
           <p className="text-sm sm:text-base text-ink-secondary leading-relaxed">
-            Create a live room or join with a code. Kinesia translates speech in real time and
-            builds conversation intelligence when you finish.
+            Create a room or join someone you know. Choose your languages, check your audio,
+            and bring everyone into the conversation.
           </p>
         </div>
       </motion.section>

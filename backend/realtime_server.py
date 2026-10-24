@@ -18,6 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from backend.config import AppConfig, _is_missing, load_config
+from backend.conversation_api import register_conversation_routes
+from backend.conversation_recap import RecapService
 from backend.dashboard_server import DashboardRequestHandler, DashboardState
 from backend.db.auth import get_user_profile, verify_token
 from backend.db.connection import is_postgres
@@ -47,6 +49,7 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
     async def lifespan(app):
         state = await asyncio.to_thread(state_factory, config)
         app.state.dashboard = state
+        app.state.recaps = await asyncio.to_thread(RecapService, config)
         app.state.rooms = RealtimeRooms(state.coordinator, config)
         class LegacyHandler(DashboardRequestHandler):
             pass
@@ -64,6 +67,7 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
                 yield
             finally:
                 await app.state.rooms.close()
+                app.state.recaps.close()
                 await asyncio.to_thread(server.shutdown)
                 server.server_close()
                 await asyncio.to_thread(state.stop_all_channels)
@@ -73,6 +77,7 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
     app.add_middleware(CORSMiddleware, allow_origins=config.allowed_origins or ["*"],
                        allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
                        allow_headers=["Authorization", "Content-Type", "Accept"])
+    register_conversation_routes(app, auth_user, language)
 
     @app.get("/api/v1/health")
     @app.get("/api/health")
@@ -80,6 +85,7 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
         return {"ok": True, "data": {"status": "healthy", "transport": "websocket",
                 "translation_provider": "soniox", "tts_provider": "cartesia",
                 "database": "postgresql" if is_postgres() else "sqlite",
+                "recap_configured": not _is_missing(config.groq_api_key),
                 "speech_configured": not _is_missing(config.soniox_api_key) and not _is_missing(config.cartesia_api_key)
                                      and any(channel.cartesia_voice_id for channel in config.channels.values())}, "error": None}
 
@@ -151,10 +157,13 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
                                 session.error("The room's listening-language limit was reached.", "room")
                                 continue
                             await asyncio.to_thread(coordinator.update_participant_status, code, user["id"], source, target, event.get("is_muted"))
+                            if session.participant and session.participant.is_muted:
+                                runtime.voice(session, False)
                             session.send({"type": "audio_reset"})
                             await runtime.refresh(code)
                         elif event.get("type") == "speaking" and time.monotonic() - session.last_speaking_event > 0.15:
                             session.last_speaking_event = time.monotonic()
+                            runtime.voice(session, bool(event.get("active")))
                             coordinator.broadcast_event(code, "speaking", {"speaker_id": user["id"], "speaker_name": user.get("display_name"), "is_speaking": bool(event.get("active"))})
                         elif event.get("type") == "ping":
                             session.send({"type": "pong", "data": event.get("data")})

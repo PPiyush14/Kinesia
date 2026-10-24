@@ -76,7 +76,7 @@
 }
 
 @layer utilities {
-  .safe-pb { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .safe-pb { padding-bottom: max(12px, env(safe-area-inset-bottom, 0px)); }
   .safe-pt { padding-top: env(safe-area-inset-top, 0px); }
 
   .line-clamp-2 {

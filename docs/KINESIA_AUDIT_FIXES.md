@@ -1,5 +1,100 @@
 # Kinesia pipeline audit and fixes
 
+## Current release: fluent conversations, recaps, and private saved moments
+
+The working speech baseline remains preserved at
+`checkpoint/working-realtime-2026-10-24` (`40b0b14`). This release builds on
+the host/history fixes below and retains the existing Soniox model, Cartesia
+voice, PostgreSQL data, REST/SSE contracts, and combined Docker deployment.
+Private environment values and database contents are outside the Git checkpoint.
+
+Confirmed pipeline changes:
+
+- Previously, short translated clauses could wait for sentence punctuation, a
+  long text threshold, or the final endpoint. A 350-ms clause-release timer now
+  releases word-safe finalized translation when enough text is available. Partial
+  hypotheses remain caption-only. The original Soniox endpoint setting remains.
+- Previously, Cartesia generated each clause in a separate speech context. Clauses
+  now share a provider context within an utterance, explicitly flush for prompt
+  audio, then close at the utterance boundary. Transport IDs remain unique per
+  clause, with sequence numbers, so cancellation and reconnect cannot replay it.
+- A listener joining mid-clause receives its actual initial sequence. Provider
+  idle-disconnected sockets reconnect before reuse. Cancellation stops obsolete
+  synthesis without presenting an ordinary interruption as a provider failure.
+- Capture epochs and continuing per-speaker audio positions prevent transcript
+  merging across reconnects while still merging parallel language translations
+  of the same source utterance. Legitimate repeated phrases remain separate.
+- Interruption handling requires sustained voice activity plus fresh recognized
+  text, rather than noise alone. Intentional acknowledgements are preserved.
+  Room-scoped takeover cancels other speakers' stale queued audio; local speech
+  gently lowers incoming playback. Captions/transcripts retain the full text.
+  This is conservative intent inference, not perfect understanding of intent.
+
+Approved product changes:
+
+- Reworked the home, history, conversation review, transcript rows, and call
+  captions while retaining the dark/green/cyan palette. Multiple speakers have
+  separate captions; old final captions cannot overwrite newer partial speech.
+  Mobile controls retain safe padding and participant cards stay stable when an
+  audio error appears. Ended conversations open their review instead of a lobby.
+- **Saved Moments** are private per-account transcript bookmarks. They survive
+  refresh and remain accessible after personal history removal. Shared source
+  clearing removes their derived entries. Global and room-specific lists stay
+  synchronized; late saved-moment navigation responses cannot reopen an older
+  selection. These last two UI races were reproduced before their fixes.
+- **AI recaps** use a separate Groq key and default `openai/gpt-oss-120b`. A
+  participant explicitly requests a recap after a recorded conversation ends.
+  The model receives original transcript data, generates general summaries,
+  highlights, explicit follow-ups, and open questions in the selected language,
+  and cites source turns with exact original-language quotes. Schema, source IDs,
+  quotes, and completion status are validated; semantic accuracy still needs review.
+- Recaps support copy/export, source navigation, polling, retry, persisted jobs,
+  rate-limit backoff, and honest unavailable states. No model request runs on the
+  live speech path or delays room ending. Long transcripts use bounded map/reduce
+  processing instead of silent truncation. Restarted jobs fail with retry.
+- Additive tables `saved_moments` and `conversation_recaps` preserve existing
+  schemas. Membership and bearer authentication protect all new room routes.
+  Non-recorded rooms cannot save bookmarks or generate recaps. Clearing source
+  data invalidates queued/in-flight derived jobs; deleted jobs cannot recreate
+  results. A status-poll versus transcript-clear race was reproduced and fixed.
+- Real provider errors and keys are never returned as recap errors. `.env`
+  remains ignored and excluded from Docker. API/build secret checks are part of
+  release verification. No live production database operation or deployment was
+  performed.
+
+Actual live synthetic checks on 2026-10-24:
+
+- Soniox English recognition/native Hindi translation into Cartesia Hindi:
+  39 caption updates, one final source segment, three voiced stable phrases,
+  403,200 PCM bytes. Voiced text matched the complete final translation and
+  preserved an acknowledgement, a correction from nine to six, and negation.
+  Stable translated clause to first PCM: **187, 172, 156 ms**. These measurements
+  exclude recognition delay, Render transport, and browser playback; they are
+  individual observations rather than end-to-end latency claims.
+- Groq Hindi recap: **1,359 ms**, validated source quotes, corrected six rather
+  than five, tea follow-up, and no invented coffee task. Synthetic content only;
+  this did not access any saved conversation or production database.
+
+The deployment guide contains the required Render environment and manual test
+steps. Free Render cold starts, speech/LLM quotas, the eight-person/four-language
+admission limits, process-local routing, and bounded overload queues still apply.
+Real devices and Render calls are required to assess fluency and acoustic overlap.
+
+Final automated verification for this release: **114 backend tests passed**
+(69.51 seconds), **19 frontend audio unit regressions passed**, and **15 Chrome
+browser scenarios passed** (24.9 seconds). Strict TypeScript and the Vite
+production build passed. Ruff checks on new/changed streaming and recap modules,
+tests and probe scripts passed, as did undefined-name/duplicate-definition checks
+across the backend and Git whitespace validation. `npm audit` reported **zero
+vulnerabilities**. The repository/build scan found no actual local credentials,
+credential-bearing PostgreSQL URLs, or private keys in the release files.
+The backend suite retains one upstream Starlette/httpx test-adapter deprecation
+warning. A full browser run caught a StrictMode initial-selection regression
+during the navigation fix; it was corrected, rebuilt, and the full suite passed.
+Only superseded hashed frontend assets are removed; replacements are committed
+with the updated HTML. The user's untracked summary/source-dump files are retained
+and excluded from the release.
+
 ## Follow-up: working checkpoint and conversation workflow fixes
 
 The user confirmed the deployed speech recognition, translation and voice quality

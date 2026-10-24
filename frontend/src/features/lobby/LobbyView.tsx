@@ -99,7 +99,7 @@ export function LobbyView({
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
               </span>
-              <span>Green Room Check</span>
+              <span>Before you join</span>
             </div>
 
             <h1 className="font-display text-2xl font-bold text-ink-primary tracking-tight">
@@ -117,6 +117,9 @@ export function LobbyView({
                 {copiedCode ? <Check size={12} className="text-accent" /> : <Copy size={12} />}
               </button>
             </div>
+            <p className="mx-auto max-w-sm pt-2 text-2xs leading-relaxed text-ink-muted">
+              {room.record_session === false ? 'Saving is off. Live captions are temporary; no transcript, recap or saved moments are kept.' : 'Saving is on. Participants can revisit the transcript and request AI recaps that process saved text with an external provider. Your bookmarks are private.'}
+            </p>
           </div>
 
           {/* Audio & Mic Hardware Settings */}

@@ -32,8 +32,8 @@ export function Sidebar({
 }: SidebarProps) {
   const navItems = [
     { id: 'welcome' as ViewState, label: 'Home', icon: Home },
-    { id: 'workspace' as ViewState, label: 'Workspace', icon: LayoutGrid },
-    { id: 'history' as ViewState, label: 'History & Notes', icon: History },
+    { id: 'workspace' as ViewState, label: 'Conversations', icon: LayoutGrid },
+    { id: 'history' as ViewState, label: 'History & Moments', icon: History },
     { id: 'profile' as ViewState, label: 'Profile & Audio', icon: User },
   ];
 
@@ -76,7 +76,7 @@ export function Sidebar({
             leftIcon={<Plus size={16} />}
             className="w-full shadow-md shadow-accent/15 font-medium"
           >
-            New Session
+            New conversation
           </Button>
 
           {/* Navigation Links */}

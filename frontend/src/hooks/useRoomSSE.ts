@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import type { Participant, TranscriptTurn } from '@/types';
 
 export interface RoomSSEHandlers {
-  onSpeaking?: (userId: number | string, name?: string) => void;
+  onSpeaking?: (userId: number | string, name?: string, active?: boolean) => void;
   onTurn?: (turn: TranscriptTurn) => void;
   onParticipants?: (participants: Participant[]) => void;
   onParticipantJoined?: (participant: Participant) => void;

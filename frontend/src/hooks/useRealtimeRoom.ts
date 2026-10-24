@@ -98,8 +98,8 @@ export function useRealtimeRoom(
           handlersRef.current.onParticipants?.(Array.isArray(data) ? data : []);
         else if (message.type === 'participant_joined') handlersRef.current.onParticipantJoined?.(data);
         else if (message.type === 'participant_left') handlersRef.current.onParticipantLeft?.(data.user_id);
-        else if (message.type === 'speaking' && data.is_speaking !== false)
-          handlersRef.current.onSpeaking?.(data.speaker_id, data.speaker_name);
+        else if (message.type === 'speaking')
+          handlersRef.current.onSpeaking?.(data.speaker_id, data.speaker_name, data.is_speaking !== false);
         else if (message.type === 'caption') handlersRef.current.onCaption?.(data);
         else if (message.type === 'turn') {
           const key = `${data.turn_id ?? data.id}:${data.revision ?? 0}`;
@@ -121,6 +121,7 @@ export function useRealtimeRoom(
           }
         } else if (message.type === 'audio_end') engine?.player?.end(data.stream_id);
         else if (message.type === 'audio_reset') engine?.player?.reset();
+        else if (message.type === 'audio_interrupt') engine?.player?.interruptExcept(data.speaker_id);
         else if (message.type === 'pipeline_error')
           setError(data?.message || 'Translation is temporarily unavailable.');
         else if (message.type === 'transcripts_cleared') handlersRef.current.onTranscriptsCleared?.();
@@ -208,6 +209,7 @@ export function useRealtimeRoom(
         (active) => {
           if (disposed) return;
           setIsSpeaking(active);
+          engine.player?.duck?.(active);
           // Full-duplex conversation: local speech must not discard the tail of
           // another participant's translated sentence. Output mute is explicit.
           const socket = socketRef.current;
@@ -227,6 +229,7 @@ export function useRealtimeRoom(
     return () => {
       disposed = true;
       engine.stopMicrophone();
+      engine.player?.duck?.(false);
     };
   }, [status, options.micMuted, roomCode, retryCount]);
 

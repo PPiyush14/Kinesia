@@ -1,566 +1,539 @@
-import { useEffect, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  FileText,
-  Clock,
-  Copy,
-  Download,
-  ArrowRight,
   ArrowLeft,
+  ArrowUpRight,
+  Bookmark,
+  Clock,
+  History,
+  MessageCircle,
   RefreshCw,
   Search,
-  CheckCircle2,
-  Calendar,
-  MessageSquare,
-  Sparkles,
   Trash2,
-  AlertTriangle,
+  X,
 } from 'lucide-react';
-import type { Room, SessionInsights, TranscriptTurn } from '@/types';
 import { roomService } from '@/services/api';
-import { formatRelativeTime } from '@/lib/utils';
+import type { Room, SavedMoment } from '@/types';
+import { SUPPORTED_LANGUAGES } from '@/types';
 import { Button } from '@/components/ui/Button';
-import { Badge } from '@/components/ui/Badge';
-import { Card, CardContent, CardHeader } from '@/components/ui/Card';
+import { useSavedMoments } from '@/hooks/useSavedMoments';
+import { cn, formatRelativeTime } from '@/lib/utils';
+import { ConversationReview } from '@/features/insights/ConversationReview';
 
 interface HistoryViewProps {
   onSelectRoom: (room: Room, isExistingLive: boolean) => void;
-  onToast: (msg: string, tone?: 'success' | 'error' | 'info') => void;
+  onToast: (message: string, tone?: 'success' | 'error' | 'info') => void;
   onBackToHome?: () => void;
+  language?: string;
+  currentUserId?: string | number;
+  initialRoomCode?: string;
 }
 
-export function HistoryView({ onSelectRoom, onToast, onBackToHome }: HistoryViewProps) {
+export function HistoryView({
+  onSelectRoom,
+  onToast,
+  onBackToHome,
+  language = 'en',
+  currentUserId,
+  initialRoomCode,
+}: HistoryViewProps) {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
-  const [insights, setInsights] = useState<SessionInsights | null>(null);
-  const [transcripts, setTranscripts] = useState<TranscriptTurn[]>([]);
-  const [loadingDetails, setLoadingDetails] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [showClearModal, setShowClearModal] = useState(false);
-  const [showClearAllModal, setShowClearAllModal] = useState(false);
-  const [clearingLogs, setClearingLogs] = useState(false);
-  const [clearingAll, setClearingAll] = useState(false);
-  const [deletingCode, setDeletingCode] = useState<string | null>(null);
-  const detailsRequest = useRef(0);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Room | null>(null);
+  const [query, setQuery] = useState('');
+  const [tab, setTab] = useState<'conversations' | 'moments'>('conversations');
+  const [output, setOutput] = useState(language);
+  const [modal, setModal] = useState<'history' | 'transcript' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [reviewRevision, setReviewRevision] = useState(0);
+  const requests = useRef(0);
+  const selectionRequests = useRef(0);
+  const initialApplied = useRef(false);
+  const selectRoom = useCallback((room: Room | null) => {
+    initialApplied.current = true;
+    selectionRequests.current++;
+    setSelected(room);
+  }, []);
+  useEffect(() => {
+    if (!initialApplied.current && initialRoomCode && rooms.length) {
+      const room = rooms.find((entry) => entry.room_code === initialRoomCode);
+      if (room) {
+        selectRoom(room);
+      }
+    }
+  }, [rooms, initialRoomCode, selectRoom]);
+  const moments = useSavedMoments(undefined, (message) =>
+    onToast(message, 'error'),
+  );
 
-  const fetchRooms = async () => {
+  const refresh = async () => {
+    const generation = ++requests.current;
     setLoading(true);
+    setError(null);
+    moments.refresh();
     try {
       const data = await roomService.listRooms();
-      setRooms(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error(err);
-      onToast('Could not load session history', 'error');
+      if (generation === requests.current)
+        setRooms(Array.isArray(data) ? data : []);
+    } catch (reason) {
+      if (generation === requests.current)
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : 'History could not be loaded.',
+        );
     } finally {
+      if (generation === requests.current) setLoading(false);
+    }
+  };
+  useEffect(() => {
+    void refresh();
+    return () => {
+      requests.current++;
+      selectionRequests.current++;
+    };
+  }, []);
+
+  const remove = async (room: Room) => {
+    setBusy(true);
+    requests.current++;
+    selectionRequests.current++;
+    try {
+      await roomService.deleteRoom(room.room_code);
+      setRooms((previous) =>
+        previous.filter((entry) => entry.room_code !== room.room_code),
+      );
+      setSelected((previous) =>
+        previous?.room_code === room.room_code ? null : previous,
+      );
+      onToast('Removed from your history. Other participants keep their copy.');
+    } catch (reason) {
+      onToast(
+        reason instanceof Error
+          ? reason.message
+          : 'Could not remove this history entry.',
+        'error',
+      );
+    } finally {
+      setBusy(false);
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    void fetchRooms();
-    return () => { detailsRequest.current++; };
-  }, []);
-
-  const handleSelectSession = async (room: Room) => {
-    const request = ++detailsRequest.current;
-    setSelectedRoom(room);
-    setLoadingDetails(true);
-    setInsights(null);
-    setTranscripts([]);
-
+  const confirm = async () => {
+    setBusy(true);
+    requests.current++;
+    selectionRequests.current++;
     try {
-      const [ins, tr] = await Promise.allSettled([
-        roomService.getInsights(room.room_code),
-        roomService.getTranscripts(room.room_code),
-      ]);
-
-      if (request !== detailsRequest.current) return;
-      if (ins.status === 'fulfilled' && ins.value) {
-        setInsights(ins.value);
+      if (modal === 'history') {
+        await roomService.clearAllRooms();
+        setRooms([]);
+        setSelected(null);
+        onToast(
+          'Your history entries were removed. Saved moments and shared conversations remain available.',
+        );
+      } else if (selected) {
+        await roomService.clearTranscripts(selected.room_code);
+        setReviewRevision((value) => value + 1);
+        moments.refresh();
+        onToast('Shared transcript, notes and saved moments were cleared.');
       }
-      if (tr.status === 'fulfilled' && Array.isArray(tr.value)) {
-        setTranscripts(tr.value);
-      }
-    } catch (err) {
-      console.error('Error loading session details', err);
+      setModal(null);
+    } catch (reason) {
+      onToast(
+        reason instanceof Error
+          ? reason.message
+          : 'This action could not be completed.',
+        'error',
+      );
     } finally {
-      if (request === detailsRequest.current) setLoadingDetails(false);
+      setBusy(false);
+      setLoading(false);
     }
   };
-
-  const handleDeleteRoom = async (roomCode: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    setDeletingCode(roomCode);
+  const openMoment = async (moment: SavedMoment) => {
+    initialApplied.current = true;
+    const generation = ++selectionRequests.current;
     try {
-      await roomService.deleteRoom(roomCode);
-      setRooms((prev) => prev.filter((r) => r.room_code !== roomCode));
-      if (selectedRoom?.room_code === roomCode) {
-        detailsRequest.current++;
-        setSelectedRoom(null);
-        setInsights(null);
-        setTranscripts([]);
-      }
-      onToast(`Session ${roomCode} removed from your history`, 'success');
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to delete session', 'error');
-    } finally {
-      setDeletingCode(null);
+      const room = await roomService.getRoom(moment.room_code);
+      if (generation === selectionRequests.current) setSelected(room);
+    } catch (reason) {
+      if (generation === selectionRequests.current)
+        onToast(
+          reason instanceof Error
+            ? reason.message
+            : 'Conversation unavailable.',
+          'error',
+        );
     }
   };
-
-  const handleClearAllHistory = async () => {
-    setClearingAll(true);
-    try {
-      await roomService.clearAllRooms();
-      detailsRequest.current++;
-      setRooms([]);
-      setSelectedRoom(null);
-      setInsights(null);
-      setTranscripts([]);
-      setShowClearAllModal(false);
-      onToast('All session history cleared', 'success');
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to clear history', 'error');
-    } finally {
-      setClearingAll(false);
-    }
-  };
-
-  const handleClearTranscripts = async () => {
-    if (!selectedRoom) return;
-    const request = detailsRequest.current;
-    setClearingLogs(true);
-    try {
-      await roomService.clearTranscripts(selectedRoom.room_code);
-      if (request === detailsRequest.current) {
-        setTranscripts([]);
-        setInsights(null);
-        setShowClearModal(false);
-      }
-      onToast('Shared transcript and saved notes cleared', 'success');
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to clear logs', 'error');
-    } finally {
-      setClearingLogs(false);
-    }
-  };
-
-  const filteredRooms = rooms.filter((r) => {
-    const q = searchQuery.toLowerCase().trim();
-    if (!q) return true;
-    return r.title.toLowerCase().includes(q) || r.room_code.toLowerCase().includes(q);
-  });
-
-  const buildMarkdown = () => {
-    if (!selectedRoom) return '';
-    const summary = insights?.executive_summary || 'No summary available.';
-    const actions = insights?.action_items || [];
-    const keys = insights?.key_points || [];
-
-    return `# Conversation Summary: ${selectedRoom.title}
-Room Code: ${selectedRoom.room_code}
-Date: ${selectedRoom.created_at ? new Date(typeof selectedRoom.created_at === 'number' ? selectedRoom.created_at * 1000 : selectedRoom.created_at).toLocaleString() : 'N/A'}
-
-## Overview & Key Takeaways
-${summary}
-
-## Key Discussion Points
-${keys.length > 0 ? keys.map((k) => `- ${k}`).join('\n') : 'No key points recorded.'}
-
-## Possible Follow-ups
-${actions.length > 0 ? actions.map((a) => `- [ ] ${a}`).join('\n') : 'No follow-ups recorded.'}
-
-## Dialogue Turns (${transcripts.length})
-${transcripts.map((t) => `**${t.speaker_name}**: ${t.localized_text || t.original_text}`).join('\n\n')}
-`;
-  };
-
-  const copyMarkdown = async () => {
-    const md = buildMarkdown();
-    try {
-      await navigator.clipboard.writeText(md);
-      setCopied(true);
-      onToast('Copied Conversation Summary to clipboard', 'success');
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      onToast('Could not copy', 'error');
-    }
-  };
-
-  const downloadMarkdown = () => {
-    const md = buildMarkdown();
-    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `kinesia-${selectedRoom?.room_code || 'session'}-notes.md`;
-    a.click();
-    URL.revokeObjectURL(url);
-    onToast('Downloaded Markdown export');
-  };
+  const needle = query.toLocaleLowerCase().trim();
+  const filtered = rooms.filter((room) =>
+    (room.title + ' ' + room.room_code).toLocaleLowerCase().includes(needle),
+  );
+  const saved = moments.moments.filter((moment) =>
+    (
+      moment.original_text +
+      ' ' +
+      moment.title +
+      ' ' +
+      Object.values(moment.translations).join(' ')
+    )
+      .toLocaleLowerCase()
+      .includes(needle),
+  );
+  const host =
+    selected?.is_host ||
+    (selected?.host_id != null &&
+      String(selected.host_id) === String(currentUserId));
 
   return (
-    <div className="mx-auto max-w-6xl px-4 sm:px-6 py-8 sm:py-10 space-y-8">
-      {/* Top Breadcrumb / Back Button */}
-      {onBackToHome && (
+    <div className="mx-auto max-w-7xl px-4 py-7 sm:px-8 sm:py-10">
+      <header className="mb-7 flex flex-wrap items-start justify-between gap-5">
         <div>
-          <button
-            type="button"
-            onClick={onBackToHome}
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted hover:text-ink-primary transition-colors px-2 py-1 -ml-2 rounded-lg hover:bg-surface-2"
-          >
-            <ArrowLeft size={14} /> Back to Home
-          </button>
-        </div>
-      )}
-
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-ink-primary">
-            Session History & Notes
+          {onBackToHome && (
+            <button
+              onClick={onBackToHome}
+              className="mb-4 inline-flex items-center gap-1 text-xs text-ink-muted hover:text-ink-primary"
+            >
+              <ArrowLeft size={13} /> Home
+            </button>
+          )}
+          <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.2em] text-accent">
+            Your space
+          </p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink-primary sm:text-3xl">
+            Good conversations stay with you.
           </h1>
-          <p className="text-xs sm:text-sm text-ink-muted mt-1">
-            Browse past dialogues, review saved conversation notes, and manage recorded transcripts.
+          <p className="mt-3 text-sm text-ink-muted">
+            Revisit a conversation. Find a detail. Keep a moment.
           </p>
         </div>
-
-        <div className="flex items-center gap-2">
-          {rooms.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowClearAllModal(true)}
-              leftIcon={<Trash2 size={13} className="text-danger" />}
-              className="text-danger hover:bg-danger/10"
-            >
-              Clear All History
-            </Button>
-          )}
+        <div className="flex gap-2">
           <Button
-            variant="ghost"
             size="sm"
-            onClick={fetchRooms}
-            leftIcon={<RefreshCw size={13} className={loading ? 'animate-spin' : ''} />}
+            variant="ghost"
+            onClick={() => void refresh()}
+            disabled={busy || loading}
+            leftIcon={
+              <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            }
           >
-            Refresh
+            Refresh history
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setModal('history')}
+            disabled={busy || rooms.length === 0}
+            leftIcon={<Trash2 size={13} />}
+          >
+            Clear my history
           </Button>
         </div>
-      </div>
+      </header>
 
-      {/* Main Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left Column: Room Sessions List */}
-        <div className="lg:col-span-5 space-y-3">
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted" />
-            <input
-              type="text"
-              placeholder="Search sessions by title or code..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 text-xs rounded-xl bg-surface-1 border border-border text-ink-primary placeholder:text-ink-muted focus:outline-none focus:border-accent/40"
-            />
-          </div>
-
-          {loading ? (
-            <div className="py-12 text-center text-xs text-ink-muted">Loading conversation logs...</div>
-          ) : filteredRooms.length === 0 ? (
-            <Card className="border border-border bg-surface-1/50 p-8 text-center space-y-2">
-              <FileText size={24} className="mx-auto text-ink-muted" />
-              <p className="text-xs font-medium text-ink-secondary">No sessions found</p>
-              <p className="text-2xs text-ink-muted">
-                {searchQuery ? 'Try a different search term' : 'Start or join a conversation to build your history'}
-              </p>
-            </Card>
-          ) : (
-            filteredRooms.map((room) => {
-              const isSelected = selectedRoom?.id === room.id;
-              const isLive = room.status === 'live';
-
-              return (
-                <Card
-                  key={room.id}
-                  onClick={() => handleSelectSession(room)}
-                  className={`cursor-pointer transition-all border p-4 ${
-                    isSelected
-                      ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
-                      : 'border-border bg-surface-1 hover:border-border-subtle hover:bg-surface-2/60'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <h3 className="font-semibold text-xs sm:text-sm text-ink-primary line-clamp-1">
-                      {room.title || 'Untitled Session'}
-                    </h3>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <Badge tone={isLive ? 'accent' : 'default'}>
-                        {isLive ? 'Live' : 'Archived'}
-                      </Badge>
-                      <button
-                        type="button"
-                        onClick={(e) => void handleDeleteRoom(room.room_code, e)}
-                        className="p-1 rounded-md text-ink-muted hover:text-danger hover:bg-danger/10 transition-colors"
-                        title="Remove this session from my history"
-                        disabled={deletingCode === room.room_code}
-                      >
-                        <Trash2 size={13} className={deletingCode === room.room_code ? 'animate-pulse' : ''} />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 text-2xs text-ink-muted mt-2">
-                    <span className="font-mono font-semibold text-ink-secondary tracking-wider">
-                      {room.room_code}
-                    </span>
-                    {room.created_at && (
-                      <span className="flex items-center gap-1">
-                        <Clock size={12} /> {formatRelativeTime(room.created_at)}
-                      </span>
-                    )}
-                  </div>
-                </Card>
-              );
-            })
-          )}
-        </div>
-
-        {/* Selected Session Details Viewer */}
-        <div className="lg:col-span-7">
-          {!selectedRoom ? (
-            <Card className="border border-border bg-surface-1/40 p-12 text-center space-y-3">
-              <div className="h-12 w-12 rounded-2xl bg-surface-2 flex items-center justify-center mx-auto text-accent">
-                <Sparkles size={22} />
-              </div>
-              <h3 className="font-semibold text-sm text-ink-primary">Select a Session</h3>
-              <p className="text-xs text-ink-muted max-w-sm mx-auto">
-                Choose a conversation to review its notes, highlights, possible follow-ups, and saved transcript.
-              </p>
-            </Card>
-          ) : loadingDetails ? (
-            <Card className="border border-border bg-surface-1 p-12 text-center space-y-3">
-              <div className="h-8 w-8 rounded-full border-2 border-accent border-t-transparent animate-spin mx-auto" />
-              <p className="text-xs text-ink-muted">Retrieving session notes & transcripts...</p>
-            </Card>
-          ) : (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.25 }}
-              className="space-y-5"
+      <div className="grid items-start gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
+        <aside
+          className={cn('min-w-0 space-y-4', selected && 'hidden lg:block')}
+        >
+          <div className="flex rounded-xl border border-border bg-surface-1 p-1">
+            <button
+              className={cn(
+                'flex flex-1 items-center justify-center gap-2 rounded-lg p-2 text-xs',
+                tab === 'conversations'
+                  ? 'bg-surface-3 text-ink-primary'
+                  : 'text-ink-muted',
+              )}
+              onClick={() => setTab('conversations')}
             >
-              {/* Header card */}
-              <Card className="border border-border bg-surface-1 p-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h2 className="text-base font-bold text-ink-primary">{selectedRoom.title}</h2>
-                      <span className="font-mono text-2xs px-2 py-0.5 rounded bg-surface-2 border border-border text-ink-secondary">
-                        {selectedRoom.room_code}
-                      </span>
-                    </div>
-                    {selectedRoom.created_at && (
-                      <p className="text-2xs text-ink-muted mt-1 flex items-center gap-1">
-                        <Calendar size={12} /> {new Date(typeof selectedRoom.created_at === 'number' ? selectedRoom.created_at * 1000 : selectedRoom.created_at).toLocaleString()}
-                      </p>
+              <History size={13} /> Conversations
+            </button>
+            <button
+              className={cn(
+                'flex flex-1 items-center justify-center gap-2 rounded-lg p-2 text-xs',
+                tab === 'moments'
+                  ? 'bg-surface-3 text-ink-primary'
+                  : 'text-ink-muted',
+              )}
+              onClick={() => setTab('moments')}
+            >
+              <Bookmark size={13} /> Saved moments
+            </button>
+          </div>
+          <label className="flex items-center gap-2 rounded-xl border border-border bg-surface-1 px-3 text-ink-muted">
+            <Search size={14} />
+            <input
+              aria-label="Search history and saved moments"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Find a conversation or a phrase"
+              className="min-w-0 flex-1 bg-transparent py-3 text-xs text-ink-primary outline-none placeholder:text-ink-faint"
+            />
+          </label>
+          {error && (
+            <p role="alert" className="text-xs text-warn">
+              {error}
+            </p>
+          )}
+          {tab === 'conversations' ? (
+            loading ? (
+              <p
+                role="status"
+                className="p-6 text-center text-xs text-ink-muted"
+              >
+                Loading conversations…
+              </p>
+            ) : filtered.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-border p-7 text-center text-ink-muted">
+                <MessageCircle
+                  size={24}
+                  className="mx-auto mb-3 text-ink-faint"
+                />
+                <p className="text-sm">No sessions found</p>
+                <p className="mt-2 text-xs">
+                  {query
+                    ? 'Try another title or room code.'
+                    : 'Your conversations will appear here.'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filtered.map((room) => (
+                  <div
+                    key={room.room_code}
+                    className={cn(
+                      'group flex items-start gap-2 rounded-2xl border p-4 transition-colors',
+                      selected?.room_code === room.room_code
+                        ? 'border-accent/40 bg-accent/5'
+                        : 'border-border bg-surface-1 hover:bg-surface-2',
                     )}
+                  >
+                    <button
+                      onClick={() => selectRoom(room)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <div className="mb-2 flex items-center gap-2 text-2xs">
+                        <span
+                          className={cn(
+                            'h-1.5 w-1.5 rounded-full',
+                            room.is_active ? 'bg-accent' : 'bg-ink-faint',
+                          )}
+                        />
+                        <span className="text-ink-muted">
+                          {room.is_active ? 'Room open' : 'Ended'}
+                          {room.is_host ? ' · You host' : ''}
+                        </span>
+                      </div>
+                      <h3 className="truncate text-sm font-semibold text-ink-primary">
+                        {room.title}
+                      </h3>
+                      <div className="mt-2 flex items-center gap-2 text-2xs text-ink-muted">
+                        <Clock size={11} />
+                        {room.created_at
+                          ? formatRelativeTime(room.created_at)
+                          : room.room_code}
+                      </div>
+                    </button>
+                    <button
+                      aria-label={'Remove ' + room.title + ' from my history'}
+                      title="Remove this session from my history"
+                      className="rounded-md p-1 text-ink-faint hover:bg-danger/10 hover:text-danger"
+                      disabled={busy}
+                      onClick={() => void remove(room)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </div>
+                ))}
+              </div>
+            )
+          ) : moments.loading ? (
+            <p role="status" className="p-6 text-xs text-ink-muted">
+              Loading your saved moments…
+            </p>
+          ) : saved.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-border p-7 text-center text-sm leading-relaxed text-ink-muted">
+              Save a line from a conversation to find it here. Your moments are
+              private.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {saved.map((moment) => (
+                <article
+                  key={moment.turn_id}
+                  className="rounded-2xl border border-border bg-surface-1 p-4"
+                >
+                  <p className="mb-2 text-2xs font-medium text-accent">
+                    {moment.speaker_name} · {moment.title}
+                  </p>
+                  <p className="text-sm leading-relaxed text-ink-secondary">
+                    {moment.translations[output] || moment.original_text}
+                  </p>
+                  <div className="mt-3 flex items-center justify-between">
+                    <button
+                      className="inline-flex items-center gap-1 text-2xs text-accent"
+                      onClick={() => void openMoment(moment)}
+                    >
+                      Open conversation <ArrowUpRight size={12} />
+                    </button>
+                    <button
+                      aria-label="Remove saved moment"
+                      disabled={moments.busy.includes(moment.turn_id)}
+                      className="text-ink-muted hover:text-danger"
+                      onClick={() =>
+                        void moments.toggle(
+                          moment.room_code,
+                          moment.turn_id,
+                          true,
+                        )
+                      }
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </aside>
 
-                  <div className="flex items-center flex-wrap gap-2">
-                    <Button variant="secondary" size="sm" onClick={copyMarkdown} leftIcon={<Copy size={13} />}>
-                      {copied ? 'Copied' : 'Copy Summary'}
+        <main className="min-w-0">
+          {selected ? (
+            <section className="rounded-3xl border border-border bg-surface-0/60 p-4 sm:p-6">
+              <button
+                onClick={() => selectRoom(null)}
+                className="mb-5 inline-flex items-center gap-1 text-xs text-ink-muted lg:hidden"
+              >
+                <ArrowLeft size={13} /> All conversations
+              </button>
+              <header className="mb-6 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="mb-2 font-mono text-2xs text-ink-muted">
+                      {selected.room_code}
+                    </p>
+                    <h2 className="font-display text-xl font-semibold text-ink-primary">
+                      {selected.title}
+                    </h2>
+                  </div>
+                  <button
+                    aria-label="Close conversation details"
+                    className="p-1 text-ink-muted"
+                    onClick={() => selectRoom(null)}
+                  >
+                    <X size={17} />
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {(selected.is_active || selected.status === 'live') && (
+                    <Button
+                      size="sm"
+                      onClick={() => onSelectRoom(selected, true)}
+                      leftIcon={<MessageCircle size={13} />}
+                    >
+                      Re-join
                     </Button>
-                    <Button variant="ghost" size="sm" onClick={downloadMarkdown} leftIcon={<Download size={13} />}>
-                      Download
-                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    title="Remove from your history; other participants keep their copy"
+                    onClick={() => void remove(selected)}
+                  >
+                    Remove from my history
+                  </Button>
+                  {host && (
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => void handleDeleteRoom(selectedRoom.room_code)}
-                      leftIcon={<Trash2 size={13} className="text-danger" />}
-                      className="text-danger hover:bg-danger/10"
-                      title="Remove from your history; other participants keep their copy"
+                      disabled={busy}
+                      className="text-danger"
+                      onClick={() => setModal('transcript')}
                     >
-                      Remove from my history
+                      Clear shared transcript
                     </Button>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setShowClearModal(true)}
-                      disabled={!selectedRoom.is_host}
-                      leftIcon={<Trash2 size={13} />}
-                      title="Only the host can clear the shared transcript for everyone"
-                    >
-                      Clear Logs
-                    </Button>
-                    {selectedRoom.status === 'live' && (
-                      <Button
-                        size="sm"
-                        onClick={() => onSelectRoom(selectedRoom, true)}
-                        rightIcon={<ArrowRight size={13} />}
-                      >
-                        Re-join
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </Card>
-
-              {/* Executive Summary Card */}
-              <Card className="border border-border bg-surface-1">
-                <CardHeader className="border-b border-border-subtle p-4 flex items-center gap-2">
-                  <Sparkles size={16} className="text-accent" />
-                  <h3 className="text-xs font-semibold text-ink-primary uppercase tracking-wider">
-                    Conversation overview
-                  </h3>
-                </CardHeader>
-                <CardContent className="p-4">
-                  <p className="text-xs sm:text-sm text-ink-secondary leading-relaxed">
-                    {insights?.executive_summary || 'No summary was generated for this session.'}
-                  </p>
-                </CardContent>
-              </Card>
-
-              {/* Action Items */}
-              {insights?.action_items && insights.action_items.length > 0 && (
-                <Card className="border border-border bg-surface-1">
-                  <CardHeader className="border-b border-border-subtle p-4 flex items-center gap-2">
-                    <CheckCircle2 size={16} className="text-accent-cyan" />
-                    <h3 className="text-xs font-semibold text-ink-primary uppercase tracking-wider">
-                      Possible follow-ups ({insights.action_items.length})
-                    </h3>
-                  </CardHeader>
-                  <CardContent className="p-4 space-y-2">
-                    {insights.action_items.map((item, i) => (
-                      <div key={i} className="flex items-start gap-2.5 text-xs text-ink-secondary">
-                        <div className="h-4 w-4 rounded-md border border-border flex items-center justify-center shrink-0 mt-0.5 text-accent">
-                          ?
-                        </div>
-                        <span>{item}</span>
-                      </div>
+                  )}
+                  <select
+                    aria-label="Review language"
+                    value={output}
+                    onChange={(event) => setOutput(event.target.value)}
+                    className="ml-auto rounded-lg border border-border bg-surface-1 px-2 py-1.5 text-xs text-ink-secondary"
+                  >
+                    {SUPPORTED_LANGUAGES.map((entry) => (
+                      <option key={entry.code} value={entry.code}>
+                        {entry.name}
+                      </option>
                     ))}
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Transcript Turns Timeline */}
-              <Card className="border border-border bg-surface-1">
-                <CardHeader className="border-b border-border-subtle p-4 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <MessageSquare size={16} className="text-ink-muted" />
-                    <h3 className="text-xs font-semibold text-ink-primary uppercase tracking-wider">
-                      Dialogue Turns ({transcripts.length})
-                    </h3>
-                  </div>
-                  {transcripts.length > 0 && selectedRoom.is_host && (
-                    <button
-                      type="button"
-                      onClick={() => setShowClearModal(true)}
-                      className="text-2xs text-danger hover:underline font-medium flex items-center gap-1"
-                    >
-                      <Trash2 size={12} /> Clear turns
-                    </button>
-                  )}
-                </CardHeader>
-                <CardContent className="p-4 max-h-80 overflow-y-auto space-y-2.5">
-                  {transcripts.length === 0 ? (
-                    <p className="text-xs text-ink-muted text-center py-6">No transcript turns recorded (logs may have been cleared).</p>
-                  ) : (
-                    transcripts.map((t, idx) => (
-                      <div key={t.id ?? idx} className="rounded-xl bg-surface-0 border border-border p-3 space-y-1">
-                        <div className="flex items-center justify-between text-2xs">
-                          <span className="font-semibold text-accent">{t.speaker_name}</span>
-                          <span className="font-mono text-ink-muted">{t.source_lang?.toUpperCase()}</span>
-                        </div>
-                        <p className="text-xs text-ink-primary leading-snug">{t.localized_text || t.original_text}</p>
-                      </div>
-                    ))
-                  )}
-                </CardContent>
-              </Card>
-            </motion.div>
+                  </select>
+                </div>
+              </header>
+              <ConversationReview
+                key={selected.room_code + ':' + reviewRevision}
+                room={selected}
+                language={output}
+                onToast={onToast}
+                onMomentsChanged={moments.refresh}
+              />
+            </section>
+          ) : (
+            <div className="hidden min-h-[480px] flex-col items-center justify-center rounded-3xl border border-dashed border-border bg-surface-1/30 p-10 text-center lg:flex">
+              <div className="mb-5 rounded-2xl border border-border bg-surface-2 p-5">
+                <MessageCircle size={28} className="text-accent" />
+              </div>
+              <h2 className="font-display text-xl text-ink-primary">
+                Pick up the thread.
+              </h2>
+              <p className="mt-3 max-w-sm text-sm leading-relaxed text-ink-muted">
+                Choose a conversation for its transcript and recap, or revisit
+                something you saved.
+              </p>
+            </div>
           )}
-        </div>
+        </main>
       </div>
 
-      {/* Clear Logs Confirmation Modal */}
-      <AnimatePresence>
-        {showClearModal && selectedRoom && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="w-full max-w-md rounded-2xl bg-surface-1 border border-border p-6 shadow-2xl space-y-4"
-            >
-              <div className="flex items-center gap-3 text-danger">
-                <div className="h-10 w-10 rounded-xl bg-danger/10 border border-danger/20 flex items-center justify-center shrink-0">
-                  <AlertTriangle size={20} />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-sm text-ink-primary">Clear Conversation Logs?</h3>
-                  <p className="text-2xs text-ink-muted font-mono">{selectedRoom.room_code}</p>
-                </div>
-              </div>
-              <p className="text-xs text-ink-secondary leading-relaxed">
-                This clears the shared transcript and saved notes of <strong>{selectedRoom.title}</strong> for every participant. To remove only your history entry, use Remove from my history instead.
-              </p>
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-border-subtle">
-                <Button variant="secondary" size="sm" onClick={() => setShowClearModal(false)}>
-                  Cancel
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={clearingLogs}
-                  onClick={handleClearTranscripts}
-                >
-                  Clear Transcripts
-                </Button>
-              </div>
-            </motion.div>
+      {modal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="history-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-border bg-surface-1 p-6">
+            <h2 id="history-confirm-title" className="text-base font-semibold">
+              {modal === 'history'
+                ? 'Clear your history?'
+                : 'Clear the shared transcript?'}
+            </h2>
+            <p className="mt-3 text-sm leading-relaxed text-ink-muted">
+              {modal === 'history'
+                ? 'This removes your history entries only. Other participants keep their copies, and active conversations continue. Your Saved Moments remain available. Rejoining a room adds it back to your history.'
+                : 'This removes the transcript, recaps and saved moments for every participant. New speech can still be saved while the room is active.'}
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => setModal(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                loading={busy}
+                onClick={() => void confirm()}
+              >
+                {modal === 'history'
+                  ? 'Clear my history'
+                  : 'Clear for everyone'}
+              </Button>
+            </div>
           </div>
-        )}
-
-        {/* Clear All Sessions Confirmation Modal */}
-        {showClearAllModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="w-full max-w-md rounded-2xl bg-surface-1 border border-border p-6 shadow-2xl space-y-4"
-            >
-              <div className="flex items-center gap-3 text-danger">
-                <div className="h-10 w-10 rounded-xl bg-danger/10 border border-danger/20 flex items-center justify-center shrink-0">
-                  <AlertTriangle size={20} />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-sm text-ink-primary">Clear All Session History?</h3>
-                  <p className="text-2xs text-ink-muted">Remove your history entries ({rooms.length} shown)</p>
-                </div>
-              </div>
-              <p className="text-xs text-ink-secondary leading-relaxed">
-                This removes rooms from your history only. Other participants keep their history, transcripts and notes, and active conversations continue. Rejoining a room adds it back to your history.
-              </p>
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-border-subtle">
-                <Button variant="secondary" size="sm" onClick={() => setShowClearAllModal(false)}>
-                  Cancel
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={clearingAll}
-                  onClick={handleClearAllHistory}
-                >
-                  Clear All History
-                </Button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+        </div>
+      )}
     </div>
   );
 }

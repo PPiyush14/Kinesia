@@ -67,6 +67,7 @@ class RoomSession:
     created_at: float = field(default_factory=time.time)
     stream_turns: dict[str, dict[str, Any]] = field(default_factory=dict)
     host_id: str = ""
+    speaker_audio_positions: dict[str, float] = field(default_factory=dict)
 
 
 def _ordered_utterance(method):
@@ -679,6 +680,8 @@ class RoomCoordinator:
                 for previous in reversed(list(room.stream_turns.values())[-20:]):
                     if previous["speaker_id"] != speaker_id:
                         continue
+                    if previous.get("_epoch", "") != segment.audio_epoch:
+                        continue
                     overlap = min(previous["_end"], segment.end_ms) - max(previous["_start"], segment.start_ms)
                     duration = min(previous["_end"] - previous["_start"], segment.end_ms - segment.start_ms)
                     if duration > 0 and overlap / duration > 0.65 and abs(previous["_start"] - segment.start_ms) < 500:
@@ -690,7 +693,7 @@ class RoomCoordinator:
                          "speaker_name": speaker_name, "original_text": segment.original,
                          "source_lang": segment.source_lang, "confidence": segment.confidence,
                          "translations": {}, "timestamp": time.time(), "revision": 0,
-                         "_start": segment.start_ms, "_end": segment.end_ms}
+                         "_start": segment.start_ms, "_end": segment.end_ms, "_epoch": segment.audio_epoch}
                 room.stream_turns[identifier] = match
                 if len(room.stream_turns) > 200:
                     del room.stream_turns[next(iter(room.stream_turns))]
@@ -710,6 +713,7 @@ class RoomCoordinator:
                     event = {key: value for key, value in match.items() if not key.startswith("_")}
                     event["translations"] = dict(match["translations"])
                     event.update(turn_id=match["id"], listening_lang=language,
+                                 audio_end_ms=match["_end"],
                                  localized_text=match["translations"].get(language, match["original_text"]),
                                  audio_data_url=None)
                     try:

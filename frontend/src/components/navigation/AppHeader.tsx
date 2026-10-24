@@ -15,10 +15,10 @@ interface AppHeaderProps {
 const titles: Record<string, string> = {
   welcome: 'Home',
   workspace: 'Workspace',
-  history: 'Session History & Notes',
+  history: 'Your conversations',
   profile: 'Profile & Settings',
-  lobby: 'Pre-call Lobby',
-  insights: 'Conversation Summary',
+  lobby: 'Before you join',
+  insights: 'Conversation recap',
 };
 
 export function AppHeader({

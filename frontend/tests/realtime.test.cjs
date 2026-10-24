@@ -365,6 +365,36 @@ test('PCM playback schedules each context/sequence once and preserves speaker or
   player.reset();
 });
 
+test('interruption cancels obsolete speech while preserving the current speaker and blocking late chunks', () => {
+  const { player, nodes } = pcmPlayer();
+  player.start({ stream_id: 'old', sample_rate: 24000, speaker_id: 'A' });
+  player.chunk('old', 0, new ArrayBuffer(480));
+  player.start({ stream_id: 'current', sample_rate: 24000, speaker_id: 'B' });
+  player.chunk('current', 0, new ArrayBuffer(480));
+  player.interruptExcept('B');
+  assert.equal(nodes[0].stopped, true);
+  assert.equal(nodes.length, 2);
+  assert.notEqual(nodes[1].stopped, true);
+  player.chunk('old', 1, new ArrayBuffer(480));
+  player.start({ stream_id: 'old', sample_rate: 24000, speaker_id: 'A' });
+  assert.equal(nodes.length, 2);
+  player.end('current');
+  player.start({ stream_id: 'new-acknowledgement', sample_rate: 24000, speaker_id: 'A' });
+  player.chunk('new-acknowledgement', 0, new ArrayBuffer(480));
+  assert.equal(nodes.length, 3, 'later acknowledged words must not be blacklisted with obsolete audio');
+  player.reset();
+});
+
+test('a listener joining an existing PCM clause can start at its actual sequence number', () => {
+  const { player, nodes, errors } = pcmPlayer();
+  player.start({ stream_id: 'mid-stream', sample_rate: 24000, sequence_start: 7 });
+  player.chunk('mid-stream', 7, new ArrayBuffer(480));
+  player.chunk('mid-stream', 8, new ArrayBuffer(480));
+  assert.equal(nodes.length, 2);
+  assert.deepEqual(errors, []);
+  player.reset();
+});
+
 test('PCM cancellation ignores late chunks and mute cannot build a stale queue', () => {
   const { player, nodes } = pcmPlayer();
   player.start({ stream_id: 'old', sample_rate: 24000 });

@@ -3,6 +3,7 @@ export interface AudioStart {
   sample_rate: number;
   speaker_id?: string | number;
   voice_start_ms?: number;
+  sequence_start?: number;
 }
 
 interface AudioStream extends AudioStart {
@@ -16,7 +17,8 @@ export class PCMPlaybackQueue {
   private streams: AudioStream[] = [];
   private byId = new Map<string, AudioStream>();
   private seen = new Set<string>();
-  private sources = new Set<AudioBufferSourceNode>();
+  private sources = new Map<AudioBufferSourceNode, { speaker?: string | number; end: number }>();
+  private output: GainNode | null = null;
   private nextTime = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   muted = false;
@@ -26,14 +28,42 @@ export class PCMPlaybackQueue {
     private onPlaying: (playing: boolean) => void,
     private onBlocked: (blocked: boolean) => void,
     private onError: (message: string) => void
-  ) {}
+  ) {
+    if (typeof context.createGain === 'function') {
+      this.output = context.createGain();
+      this.output.connect(context.destination);
+    }
+  }
+
+  duck(speaking: boolean) {
+    this.output?.gain.setTargetAtTime(speaking ? 0.45 : 1, this.context.currentTime, 0.025);
+  }
+
+  interruptExcept(speaker: string | number) {
+    const keep = (value: string | number | undefined) => String(value) === String(speaker);
+    this.streams = this.streams.filter((stream) => {
+      if (keep(stream.speaker_id)) return true;
+      this.byId.delete(stream.stream_id);
+      return false;
+    });
+    for (const [node, metadata] of this.sources) {
+      if (keep(metadata.speaker)) continue;
+      node.onended = null;
+      try { node.stop(); node.disconnect(); } catch { /* already finished */ }
+      this.sources.delete(node);
+    }
+    this.nextTime = Math.max(this.context.currentTime, ...Array.from(this.sources.values(), (source) => source.end));
+    this.onPlaying(this.sources.size > 0);
+    this.pump();
+  }
 
   start(info: AudioStart) {
     if (this.muted || this.seen.has(info.stream_id)) return;
     if (info.sample_rate < 8000 || info.sample_rate > 48000) return;
     this.seen.add(info.stream_id);
     if (this.seen.size > 1000) this.seen.delete(this.seen.values().next().value!);
-    const stream = { ...info, chunks: [], lastSequence: -1, ended: false };
+    const initial = Number.isInteger(info.sequence_start) && (info.sequence_start ?? 0) >= 0 ? info.sequence_start! : 0;
+    const stream = { ...info, chunks: [], lastSequence: initial - 1, ended: false };
     this.streams.push(stream);
     this.byId.set(info.stream_id, stream);
   }
@@ -99,8 +129,7 @@ export class PCMPlaybackQueue {
       }
       const source = this.context.createBufferSource();
       source.buffer = chunk;
-      source.connect(this.context.destination);
-      this.sources.add(source);
+      source.connect(this.output || this.context.destination);
       source.onended = () => {
         this.sources.delete(source);
         source.disconnect();
@@ -108,6 +137,7 @@ export class PCMPlaybackQueue {
         this.pump();
       };
       this.nextTime = Math.max(this.context.currentTime + 0.035, this.nextTime);
+      this.sources.set(source, { speaker: stream.speaker_id, end: this.nextTime + chunk.duration });
       source.start(this.nextTime);
       this.nextTime += chunk.duration;
       this.onPlaying(true);
@@ -121,7 +151,7 @@ export class PCMPlaybackQueue {
     this.streams = [];
     this.byId.clear();
     this.nextTime = 0;
-    for (const source of this.sources) {
+    for (const source of this.sources.keys()) {
       source.onended = null;
       try {
         source.stop();

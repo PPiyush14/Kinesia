@@ -215,6 +215,28 @@ def init_db() -> None:
                 )"""
             )
 
+            db.execute(
+                f"""CREATE TABLE IF NOT EXISTS saved_moments (
+                    user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
+                    turn_id VARCHAR(36) REFERENCES transcripts(id) ON DELETE CASCADE,
+                    created_at {real_type} NOT NULL,
+                    PRIMARY KEY (user_id, turn_id)
+                )"""
+            )
+            db.execute(
+                f"""CREATE TABLE IF NOT EXISTS conversation_recaps (
+                    room_id VARCHAR(36) REFERENCES rooms(id) ON DELETE CASCADE,
+                    language VARCHAR(10) NOT NULL,
+                    job_id VARCHAR(36) NOT NULL,
+                    source_hash VARCHAR(64) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    result_json TEXT,
+                    error TEXT,
+                    updated_at {real_type} NOT NULL,
+                    PRIMARY KEY (room_id, language)
+                )"""
+            )
+
             # Migration: Ensure gender column exists
             try:
                 if pg:

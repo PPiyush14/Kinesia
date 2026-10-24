@@ -39,6 +39,11 @@ async function meeting(page: Page, initialView = 'dialogue', historyRooms = [roo
     let data: unknown = {};
     if (url.endsWith('/auth/me')) data = user;
     else if (url.endsWith('/api/v1/rooms')) data = historyRooms;
+    else if (url.endsWith('/moments')) data = [];
+    else if (url.includes('/recap')) {
+      const target = historyRooms.find((entry) => url.includes(entry.room_code)) || room;
+      data = { status: 'not_generated', configured: true, language: 'hi', available: !target.is_active, conversation_active: target.is_active };
+    }
     else if (url.endsWith('/transcripts')) data = [];
     else if (url.endsWith('/speak')) {
       sentMessages.push(route.request().postDataJSON());
@@ -149,7 +154,7 @@ test('mobile layout exposes language, microphone, transcript and recovery contro
   const connection = await meeting(page);
   await expect(page.getByLabel('Listening language')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Unmute', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'End meeting', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'End conversation', exact: true })).toBeVisible();
   await expect
     .poll(async () =>
       page.getByTestId('participant-card').evaluateAll((cards) => {
@@ -166,16 +171,22 @@ test('mobile layout exposes language, microphone, transcript and recovery contro
   });
   await expect(page.getByRole('alert')).toContainText('temporarily unavailable');
   await expect(page.getByRole('button', { name: 'Reconnect audio' })).toBeVisible();
+  const endControl = await page.getByRole('button', { name: 'End conversation', exact: true }).boundingBox();
+  expect(endControl!.y + endControl!.height).toBeLessThanOrEqual(836);
+  await expect.poll(() => page.getByTestId('participant-card').first().evaluate((card) => {
+    const main = card.closest('main')!;
+    return card.getBoundingClientRect().top >= main.getBoundingClientRect().top;
+  })).toBe(true);
   await page.screenshot({ path: 'test-results/meeting-mobile.png', fullPage: true });
   expect(connection.errors).toEqual([]);
 });
 
-test('creator reopening a room from history keeps the End meeting control', async ({ page }) => {
+test('creator reopening a room from history keeps the End conversation control', async ({ page }) => {
   const connection = await meeting(page, 'history');
   await page.getByRole('heading', { name: room.title, exact: true }).click();
   await page.getByRole('button', { name: 'Re-join', exact: true }).click();
   await page.getByRole('button', { name: 'Enter Conversation', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'End meeting', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'End conversation', exact: true })).toBeVisible();
   expect(connection.errors).toEqual([]);
 });
 
@@ -189,28 +200,185 @@ test('history removal explains that other participants keep their copy', async (
 });
 
 test('a late history response cannot overwrite another selected conversation', async ({ page }) => {
-  const second = { ...room, id: 'second', room_code: 'kin-456-def', title: 'Second conversation' };
-  const connection = await meeting(page, 'history', [room, second]);
+  const ended = { ...room, is_active: false, status: 'ended' };
+  const second = { ...ended, id: 'second', room_code: 'kin-456-def', title: 'Second conversation' };
+  const connection = await meeting(page, 'history', [ended, second]);
   let release!: () => void;
   let firstRequested = false;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  await page.route('**/api/v1/rooms/*/insights', async (route) => {
+  const ready = (text: string) => ({ status: 'ready', configured: true, language: 'hi', result: { summary: { text, evidence: text, source_ids: ['source'] }, highlights: [], follow_ups: [], open_questions: [] } });
+  await page.route(/\/api\/v1\/rooms\/[^/]+\/recap(?:\?|$)/, async (route) => {
     if (route.request().url().includes(room.room_code)) {
       firstRequested = true;
       await gate;
-      await route.fulfill({ json: { data: { executive_summary: 'Stale first conversation notes' } } });
-    } else await route.fulfill({ json: { data: { executive_summary: 'Correct second conversation notes' } } });
+      await route.fulfill({ json: { data: ready('Stale first conversation notes') } });
+    } else await route.fulfill({ json: { data: ready('Correct second conversation notes') } });
   });
   await page.getByRole('heading', { name: room.title, exact: true }).click();
   await expect.poll(() => firstRequested).toBe(true);
   await page.getByRole('heading', { name: second.title, exact: true }).click();
   await expect(page.getByText('Correct second conversation notes', { exact: true })).toBeVisible();
-  const response = page.waitForResponse((result) => result.url().includes(`${room.room_code}/insights`));
+  const response = page.waitForResponse((result) => result.url().includes(`${room.room_code}/recap`));
   release();
   await (await response).finished();
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await expect(page.getByText('Correct second conversation notes', { exact: true })).toBeVisible();
   await expect(page.getByText('Stale first conversation notes', { exact: true })).toHaveCount(0);
+  expect(connection.errors).toEqual([]);
+});
+
+test('saved moments survive a reload and remain separate from the conversation recap', async ({ page }) => {
+  const connection = await meeting(page);
+  const turn = { id: 'remember-one', turn_id: 'remember-one', speaker_id: 'peer', speaker_name: 'Guest Participant', source_lang: 'en', listening_lang: 'hi', original_text: 'Remember tomorrow at six.', localized_text: 'कल छह बजे याद रखना।', translations: { hi: 'कल छह बजे याद रखना।' } };
+  let saved = false;
+  await page.route('**/api/v1/rooms/*/moments', async (route) => {
+    if (route.request().method() === 'POST') {
+      expect(route.request().postDataJSON()).toEqual({ turn_id: 'remember-one' });
+      saved = true;
+      await route.fulfill({ json: { data: { saved: true } } });
+    } else await route.fulfill({ json: { data: saved ? [{ ...turn, room_code: room.room_code, title: room.title }] : [] } });
+  });
+  await page.route('**/api/v1/rooms/*/transcripts', (route) => route.fulfill({ json: { data: [turn] } }));
+  connection.send('turn', turn);
+  await page.getByRole('button', { name: /Transcript/ }).click();
+  await page.getByRole('button', { name: 'Save moment', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Remove saved moment' })).toHaveAttribute('aria-pressed', 'true');
+  await page.reload();
+  await expect(page.getByRole('heading', { name: room.title })).toBeVisible();
+  await page.getByRole('button', { name: /Transcript/ }).click();
+  await expect(page.getByRole('button', { name: 'Remove saved moment' })).toHaveAttribute('aria-pressed', 'true');
+  expect(connection.errors).toEqual([]);
+});
+
+test('opening saved moments ignores an older conversation lookup arriving late', async ({ page }) => {
+  const second = { ...room, room_code: 'second-moment', title: 'The second saved conversation' };
+  const connection = await meeting(page, 'history', [room, second]);
+  let release!: () => void;
+  let firstRequested = false;
+  let delayLookups = false;
+  const delayed = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/v1/moments', (route) => route.fulfill({ json: { data: [room, second].map((entry, index) => ({ turn_id: `saved-${index}`, room_code: entry.room_code, title: entry.title, speaker_name: 'Guest', original_text: 'A private bookmark.', translations: {} })) } }));
+  await page.route(/\/api\/v1\/rooms\/[^/?]+$/, async (route) => {
+    if (route.request().url().endsWith(room.room_code) && delayLookups) {
+      firstRequested = true;
+      await delayed;
+      await route.fulfill({ json: { data: room } });
+    } else await route.fulfill({ json: { data: route.request().url().endsWith(room.room_code) ? room : second } });
+  });
+  await page.reload();
+  await page.getByRole('button', { name: 'Saved moments', exact: true }).click();
+  delayLookups = true;
+  await page.getByRole('button', { name: 'Open conversation', exact: true }).nth(0).click();
+  await expect.poll(() => firstRequested).toBe(true);
+  await page.getByRole('button', { name: 'Open conversation', exact: true }).nth(1).click();
+  await expect(page.getByRole('heading', { name: second.title, exact: true })).toBeVisible();
+  const response = page.waitForResponse((entry) => entry.url().endsWith(`/rooms/${room.room_code}`));
+  release();
+  await (await response).finished();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.getByRole('heading', { name: second.title, exact: true })).toBeVisible();
+  expect(connection.errors).toEqual([]);
+});
+
+test('review bookmarks update the private list and clearing their source removes them immediately', async ({ page }) => {
+  const connection = await meeting(page, 'history');
+  const turn = { id: 'private-source', turn_id: 'private-source', speaker_name: 'Guest', source_lang: 'en', original_text: 'Bring the blue notebook.', translations: {} };
+  let saved = false;
+  let cleared = false;
+  const payload = () => saved && !cleared ? [{ ...turn, room_code: room.room_code, title: room.title }] : [];
+  await page.route('**/api/v1/moments', (route) => route.fulfill({ json: { data: payload() } }));
+  await page.route('**/api/v1/rooms/*/moments', async (route) => {
+    if (route.request().method() === 'POST') saved = true;
+    await route.fulfill({ json: { data: payload() } });
+  });
+  await page.route('**/api/v1/rooms/*/transcripts', async (route) => {
+    if (route.request().method() === 'DELETE') cleared = true;
+    await route.fulfill({ json: { data: cleared ? [] : [turn] } });
+  });
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await page.getByRole('button', { name: 'Save moment', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Remove saved moment', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Saved moments', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Clear shared transcript', exact: true }).click();
+  await page.getByRole('button', { name: 'Clear for everyone', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open conversation', exact: true })).toHaveCount(0);
+  expect(connection.errors).toEqual([]);
+});
+
+test('AI recap is requested explicitly in the review language and links to its source', async ({ page }) => {
+  const ended = { ...room, is_active: false, status: 'ended' };
+  const connection = await meeting(page, 'history', [ended]);
+  const turn = { id: 'source-one', speaker_name: 'Guest Participant', source_lang: 'en', original_text: 'Tomorrow at six, not five.', localized_text: 'कल छह बजे, पाँच बजे नहीं।', translations: { hi: 'कल छह बजे, पाँच बजे नहीं।' } };
+  let generated = false;
+  const point = { text: 'हम कल छह बजे मिलेंगे, पाँच बजे नहीं।', source_ids: ['source-one'], evidence: turn.original_text };
+  await page.route('**/api/v1/rooms/*/transcripts', (route) => route.fulfill({ json: { data: [turn] } }));
+  await page.route(/\/api\/v1\/rooms\/[^/]+\/recap(?:\?|$)/, async (route) => {
+    if (route.request().method() === 'POST') {
+      expect(route.request().postDataJSON()).toEqual({ language: 'hi' });
+      generated = true;
+      await route.fulfill({ json: { data: { status: 'queued', configured: true } } });
+    } else await route.fulfill({ json: { data: { status: generated ? 'ready' : 'not_generated', configured: true, language: 'hi', result: generated ? { summary: point, highlights: [], follow_ups: [], open_questions: [] } : undefined } } });
+  });
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Generate AI recap' })).toBeEnabled();
+  expect(generated).toBe(false);
+  await page.getByRole('button', { name: 'Generate AI recap' }).click();
+  await expect(page.getByText(point.text, { exact: true })).toBeVisible();
+  await page.screenshot({ path: 'test-results/conversation-recap.png', fullPage: true });
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export recap' }).click();
+  expect((await download).suggestedFilename()).toBe(`kinesia-${room.room_code}-recap.md`);
+  await page.getByRole('button', { name: 'Source 1', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Transcript', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByText(turn.original_text, { exact: true })).toBeVisible();
+  expect(connection.errors).toEqual([]);
+  await page.screenshot({ path: 'test-results/conversation-history.png', fullPage: true });
+});
+
+test('overlapping speakers keep separate readable captions including an intentional hmm', async ({ page }) => {
+  const connection = await meeting(page);
+  connection.send('caption', { speaker_id: 'peer', speaker_name: 'Guest Participant', source_lang: 'en', listening_lang: 'hi', original_text: 'Hmm, yes.', localized_text: 'हम्म, हाँ।', audio_end_ms: 800 });
+  connection.send('caption', { speaker_id: 'another', speaker_name: 'Another participant', source_lang: 'en', listening_lang: 'hi', original_text: 'I have another idea.', localized_text: 'मेरे पास एक और विचार है।', audio_end_ms: 1200 });
+  await expect(page.getByRole('status')).toContainText('हम्म, हाँ।');
+  await expect(page.getByRole('status')).toContainText('मेरे पास एक और विचार है।');
+  connection.send('turn', { turn_id: 'old-final', speaker_id: 'another', speaker_name: 'Another participant', source_lang: 'en', listening_lang: 'hi', original_text: 'An older sentence.', localized_text: 'पुराना वाक्य।', audio_end_ms: 400 });
+  await expect(page.getByRole('status')).not.toContainText('पुराना वाक्य।');
+  expect(connection.errors).toEqual([]);
+});
+
+test('recap failure stays honest and can be retried without inventing notes', async ({ page }) => {
+  const ended = { ...room, is_active: false, status: 'ended' };
+  const connection = await meeting(page, 'history', [ended]);
+  let requests = 0;
+  const point = { text: 'A recap after retry.', evidence: 'Tomorrow at six.', source_ids: ['retry-source'] };
+  await page.route(/\/api\/v1\/rooms\/[^/]+\/recap(?:\?|$)/, async (route) => {
+    if (route.request().method() === 'POST') {
+      requests++;
+      await route.fulfill({ json: { data: { status: 'queued' } } });
+    } else await route.fulfill({ json: { data: { configured: true, language: 'hi', status: requests === 0 ? 'not_generated' : requests === 1 ? 'failed' : 'ready',
+      error: requests === 1 ? 'The free-tier limit was reached. Please retry later.' : undefined,
+      result: requests > 1 ? { summary: point, highlights: [], follow_ups: [], open_questions: [] } : undefined } } });
+  });
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await page.getByRole('button', { name: 'Generate AI recap' }).click();
+  await expect(page.getByRole('alert')).toContainText('free-tier limit');
+  await expect(page.getByText(point.text, { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Retry recap' }).click();
+  await expect(page.getByText(point.text, { exact: true })).toBeVisible();
+  expect(connection.errors).toEqual([]);
+});
+
+test('the new home opens an ended conversation as a review rather than a live call', async ({ page }) => {
+  const ended = { ...room, is_active: false, status: 'ended' };
+  const connection = await meeting(page, 'welcome', [ended]);
+  await expect(page.getByRole('button', { name: 'Start a conversation', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Join with a code', exact: true })).toBeVisible();
+  await page.screenshot({ path: 'test-results/conversation-home.png', fullPage: true });
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Recap', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Generate AI recap' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Enter Conversation', exact: true })).toHaveCount(0);
   expect(connection.errors).toEqual([]);
 });
 

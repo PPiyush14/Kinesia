@@ -467,6 +467,7 @@ def clear_room_transcripts(room_id: str) -> None:
     with get_db() as db:
         db.execute("DELETE FROM transcripts WHERE room_id = ?", (room_id,))
         db.execute("DELETE FROM session_insights WHERE room_id = ?", (room_id,))
+        db.execute("DELETE FROM conversation_recaps WHERE room_id = ?", (room_id,))
 
 
 def hide_room_from_history(room_id: str, user_id: str) -> None:

@@ -10,10 +10,15 @@ import uuid
 from dataclasses import dataclass
 
 from websockets.asyncio.client import connect
+from websockets.protocol import State
 
 from backend.config import AppConfig
 
 CONTROL_TOKENS = {"<end>", "<fin>"}
+
+
+class SpeechCancelled(Exception):
+    """No listener needs this obsolete speech phrase any longer."""
 
 
 @dataclass
@@ -26,6 +31,7 @@ class SpeechSegment:
     start_ms: float
     end_ms: float
     confidence: float
+    audio_epoch: str = ""
 
 
 class TranscriptBuffer:
@@ -46,6 +52,7 @@ class TranscriptBuffer:
 
     def feed(self, tokens):
         partial_original, partial_translation = [], []
+        partial_end = self.end_ms
         ended = False
         for token in tokens:
             text = str(token.get("text") or "")
@@ -55,6 +62,8 @@ class TranscriptBuffer:
             translated = token.get("translation_status") == "translation"
             if not token.get("is_final"):
                 (partial_translation if translated else partial_original).append(text)
+                if not translated:
+                    partial_end = max(partial_end, float(token.get("end_ms") or 0) + self.offset_ms)
                 continue
             if translated:
                 self.translated += text
@@ -72,6 +81,7 @@ class TranscriptBuffer:
             "turn_id": self.turn_id, "original_text": self.original + "".join(partial_original),
             "localized_text": local + "".join(partial), "listening_lang": self.target_lang,
             "source_lang": self.detected,
+            "audio_end_ms": max(self.end_ms, partial_end),
         }, ended
 
     def text(self):
@@ -79,7 +89,7 @@ class TranscriptBuffer:
         # being translated, even when the selected languages happen to match.
         return self.translated or (self.original if self.detected == self.target_lang else "")
 
-    def phrase(self, *, final=False):
+    def phrase(self, *, final=False, allow_fragment=False):
         text = self.text()
         pending = text[self.spoken:]
         if not pending.strip():
@@ -92,6 +102,13 @@ class TranscriptBuffer:
                     if len(pending[:boundary.end()].strip()) >= 12), 0)
         if not end and len(pending) >= 180:
             end = pending.rfind(" ", 0, 180)
+        if not end and allow_fragment and len(pending.strip()) >= 32:
+            # Stable translated words only. Prefer a clause boundary, otherwise
+            # release a bounded word-safe prefix instead of waiting indefinitely.
+            clauses = list(re.finditer(r"[,;:—](?:\s+|$)", pending[:120]))
+            end = clauses[-1].end() if clauses and clauses[-1].end() >= 24 else pending.rfind(" ", 0, 120)
+            if end < 24:
+                end = 0
         if final:
             end = len(pending)
         if not end:
@@ -120,12 +137,14 @@ class CartesiaStream:
         if socket is not None:
             await socket.close()
 
-    async def synthesize(self, text, language, context_id, on_chunk):
+    async def synthesize(self, text, language, context_id, on_chunk, *, continuation=False, allow_empty=False):
         """Reuse the connection; a fresh context owns each complete stable clause."""
         channel = next(iter(self.config.channels.values()))
         voice = self.config.cartesia_voice_map.get(language, channel.cartesia_voice_id)
         if not voice:
             raise ValueError("Cartesia voice ID is not configured.")
+        if self.socket is not None and getattr(self.socket, "state", State.OPEN) != State.OPEN:
+            await self.close()
         if self.socket is None:
             self.socket = await connect(
                 self.config.cartesia_websocket_url,
@@ -135,13 +154,17 @@ class CartesiaStream:
         payload = {
             "model_id": channel.cartesia_model_id, "transcript": text,
             "voice": {"mode": "id", "id": voice}, "language": language,
-            "context_id": context_id, "continue": False,
+            "context_id": context_id, "continue": continuation,
             "output_format": {"container": "raw", "encoding": "pcm_s16le", "sample_rate": channel.cartesia_sample_rate},
             "generation_config": {"speed": self.config.cartesia_speed, "volume": 1.0},
         }
         started, sequence = time.monotonic(), 0
         try:
             await self.socket.send(json.dumps(payload))
+            if continuation:
+                # Explicit flush releases this stable clause while preserving
+                # prosodic context for the next clause in the same utterance.
+                await self.socket.send(json.dumps(dict(payload, transcript="", flush=True)))
             while True:
                 remaining = self.config.cartesia_request_timeout_seconds - (time.monotonic() - started)
                 if remaining <= 0:
@@ -157,13 +180,33 @@ class CartesiaStream:
                         raise ValueError("Cartesia returned an incomplete PCM sample.")
                     await on_chunk(audio, sequence, channel.cartesia_sample_rate)
                     sequence += 1
-                if event.get("done") or event.get("type") in {"done", "completed"}:
-                    if not sequence:
+                if continuation and event.get("type") == "flush_done":
+                    if not sequence and not allow_empty:
                         raise RuntimeError("Cartesia returned no speech audio.")
                     return
+                if event.get("done") or event.get("type") in {"done", "completed"}:
+                    if not sequence and not allow_empty:
+                        raise RuntimeError("Cartesia returned no speech audio.")
+                    return
+        except SpeechCancelled:
+            await self.cancel_context(context_id)
+            raise
         except BaseException:
             await self.close()
             raise
+
+    async def cancel_context(self, context_id):
+        if self.socket is not None:
+            try:
+                await self.socket.send(json.dumps({"context_id": context_id, "cancel": True}))
+            except Exception:  # noqa: BLE001 - losing a cancelled socket should not stop later captions.
+                await self.close()
+
+    async def finish_context(self, context_id, language):
+        if self.socket is not None:
+            async def ignore_tail(*_):
+                pass
+            await self.synthesize("", language, context_id, ignore_tail, allow_empty=True)
 
 
 class SonioxStream:
@@ -176,6 +219,7 @@ class SonioxStream:
         self.socket = None
         self.task = None
         self.closed = False
+        self.on_boundary = lambda _turn_id: None
 
     def start(self):
         self.task = asyncio.create_task(self.run())
@@ -210,6 +254,7 @@ class SonioxStream:
         phrase = self.buffer.phrase(final=True)
         if phrase:
             self.on_phrase(phrase, self.buffer.turn_id)
+        self.on_boundary(self.buffer.turn_id)
         segment = self.buffer.finish()
         if segment.original:
             await self.on_final(segment)
@@ -217,6 +262,7 @@ class SonioxStream:
     async def run(self):
         sender = None
         finish_due = None
+        phrase_due = None
         try:
             async with connect(self.config.soniox_websocket_url, open_timeout=8, close_timeout=2, max_size=2 * 1024 * 1024) as socket:
                 self.socket = socket
@@ -245,13 +291,20 @@ class SonioxStream:
                 while not self.closed:
                     if sender.done() and sender.exception():
                         raise sender.exception()
-                    timeout = max(0.01, finish_due - time.monotonic()) if finish_due else 1.0
+                    deadlines = [due for due in (finish_due, phrase_due) if due is not None]
+                    timeout = max(0.01, min(deadlines) - time.monotonic()) if deadlines else 1.0
                     try:
                         response = json.loads(await asyncio.wait_for(socket.recv(), timeout=timeout))
                     except asyncio.TimeoutError:
                         if finish_due and time.monotonic() >= finish_due:
                             await self._finish()
                             finish_due = None
+                            phrase_due = None
+                        elif phrase_due and time.monotonic() >= phrase_due:
+                            phrase = self.buffer.phrase(allow_fragment=True)
+                            if phrase:
+                                self.on_phrase(phrase, self.buffer.turn_id)
+                            phrase_due = None
                         continue
                     if response.get("error_code") is not None or response.get("error_type"):
                         raise RuntimeError("Soniox rejected the stream. Check credentials, model and concurrency quota.")
@@ -261,6 +314,9 @@ class SonioxStream:
                     phrase = self.buffer.phrase()
                     if phrase:
                         self.on_phrase(phrase, self.buffer.turn_id)
+                        phrase_due = None
+                    if phrase_due is None and len(self.buffer.text()[self.buffer.spoken:].strip()) >= 32:
+                        phrase_due = time.monotonic() + self.config.speech_clause_wait_ms / 1000
                     if ended or finish_due:
                         # Translation can trail its source endpoint in the next packet.
                         finish_due = time.monotonic() + 0.18

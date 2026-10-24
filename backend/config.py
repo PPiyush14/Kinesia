@@ -93,6 +93,9 @@ class AppConfig:
     cartesia_voice_map: dict[str, str] = field(default_factory=dict)
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
     realtime_max_languages: int = 4
+    groq_api_key: str = ""
+    groq_recap_model: str = "openai/gpt-oss-120b"
+    speech_clause_wait_ms: int = 350
 
     def get_channel(self, channel_key: str) -> ChannelConfig:
         try:
@@ -257,6 +260,9 @@ def load_config() -> AppConfig:
         cartesia_voice_map=voice_map,
         allowed_origins=_split_csv(_env("CORS_ORIGINS", "*")),
         realtime_max_languages=max(1, min(8, _env_int("REALTIME_MAX_LANGUAGES", 4))),
+        groq_api_key=_env("GROQ_API_KEY", ""),
+        groq_recap_model=_env("GROQ_RECAP_MODEL", "openai/gpt-oss-120b"),
+        speech_clause_wait_ms=max(200, min(1000, _env_int("SPEECH_CLAUSE_WAIT_MS", 350))),
     )
 
 

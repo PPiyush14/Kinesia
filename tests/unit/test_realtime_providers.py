@@ -65,6 +65,22 @@ def test_short_greeting_does_not_block_the_next_stable_sentence():
     assert buffer.phrase() == "Hi. Welcome to the conversation."
 
 
+def test_stable_clause_release_never_speaks_partials_or_loses_negation_and_hmm():
+    buffer = TranscriptBuffer("en", "en")
+    buffer.feed([token("This is only an uncertain partial hypothesis", final=False)])
+    assert buffer.phrase(allow_fragment=True) == ""
+    original = "Hmm, I do not want to lose these words while speaking a longer sentence without any punctuation"
+    buffer.feed([token(original)])
+    first = buffer.phrase(allow_fragment=True)
+    second = buffer.phrase(final=True)
+    assert " ".join((first + " " + second).split()) == original
+    assert first.startswith("Hmm") and "not" in first
+    assert buffer.phrase(final=True) == ""
+    short = TranscriptBuffer("en", "en")
+    short.feed([token("Hmm.")])
+    assert short.phrase(final=True) == "Hmm."
+
+
 def test_code_switching_does_not_obey_language_hint_as_a_translation_bypass():
     buffer = TranscriptBuffer("en", "en")
     buffer.feed([token("नमस्ते", language="hi"), token("Hello", translation=True)])
@@ -89,6 +105,29 @@ class Socket:
     async def send(self, value): self.sent.append(json.loads(value))
     async def recv(self): return json.dumps(next(self.responses))
     async def close(self): self.closed = True
+
+
+def test_cartesia_continuations_flush_clauses_without_closing_voice_context(sample_config):
+    async def run():
+        socket = Socket([
+            {"type": "chunk", "data": base64.b64encode(b"\1\0").decode()}, {"type": "flush_done"},
+            {"type": "chunk", "data": base64.b64encode(b"\2\0").decode()}, {"type": "flush_done"},
+            {"type": "done", "done": True},
+        ])
+        client = CartesiaStream(replace(sample_config, cartesia_voice_map={"en": "test-voice"}))
+        chunks = []
+        async def connect(*args, **kwargs): return socket
+        async def chunk(data, sequence, rate): chunks.append((data, sequence))
+        with patch("backend.realtime_providers.connect", side_effect=connect):
+            await client.synthesize("Hmm, yes.", "en", "same-context", chunk, continuation=True)
+            await client.synthesize("Let us continue.", "en", "same-context", chunk, continuation=True)
+            await client.finish_context("same-context", "en")
+        assert chunks == [(b"\1\0", 0), (b"\2\0", 0)]
+        assert len({message["context_id"] for message in socket.sent}) == 1
+        assert socket.sent[1]["flush"] is True and socket.sent[1]["transcript"] == ""
+        assert socket.sent[-1]["continue"] is False
+        await client.close()
+    asyncio.run(run())
 
 
 def test_cartesia_streams_before_done_and_reuses_its_socket(sample_config):

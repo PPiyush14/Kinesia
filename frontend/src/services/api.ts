@@ -1,4 +1,4 @@
-import type { AuthResponse, Participant, Room, SessionInsights, TranscriptTurn, User } from '@/types';
+import type { AuthResponse, ConversationRecap, Participant, Room, SavedMoment, SessionInsights, TranscriptTurn, User } from '@/types';
 
 const TOKEN_KEY = 'kinesia_auth_token';
 
@@ -51,6 +51,7 @@ export async function apiCall<T>(
     const errorMsg =
       (result as { error?: string; message?: string }).error ||
       (result as { message?: string }).message ||
+      (typeof (result as { detail?: unknown }).detail === 'string' ? (result as { detail: string }).detail : '') ||
       `Request failed with status ${response.status}`;
     throw new ApiError(errorMsg, response.status);
   }
@@ -96,6 +97,21 @@ export const authService = {
 };
 
 export const roomService = {
+  async getRecap(code: string, language: string): Promise<ConversationRecap> {
+    return apiCall(`/api/v1/rooms/${code}/recap?output_language=${encodeURIComponent(language)}`);
+  },
+  async generateRecap(code: string, language: string): Promise<ConversationRecap> {
+    return apiCall(`/api/v1/rooms/${code}/recap`, 'POST', { language });
+  },
+  async getMoments(code?: string): Promise<SavedMoment[]> {
+    return apiCall(code ? `/api/v1/rooms/${code}/moments` : '/api/v1/moments');
+  },
+  async saveMoment(code: string, turnId: string): Promise<unknown> {
+    return apiCall(`/api/v1/rooms/${code}/moments`, 'POST', { turn_id: turnId });
+  },
+  async removeMoment(code: string, turnId: string): Promise<unknown> {
+    return apiCall(`/api/v1/rooms/${code}/moments/${encodeURIComponent(turnId)}`, 'DELETE');
+  },
   async listRooms(): Promise<Room[]> {
     return apiCall<Room[]>('/api/v1/rooms', 'GET', null, true);
   },

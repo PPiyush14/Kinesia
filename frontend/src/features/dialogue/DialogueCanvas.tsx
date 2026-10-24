@@ -26,6 +26,8 @@ import { useRealtimeRoom } from '@/hooks/useRealtimeRoom';
 import { Button } from '@/components/ui/Button';
 import { cn, initials } from '@/lib/utils';
 import { mergeTranscriptHistory } from '@/lib/transcripts';
+import { TranscriptItem } from '@/features/insights/TranscriptItem';
+import { useSavedMoments } from '@/hooks/useSavedMoments';
 
 interface DialogueCanvasProps {
   room: Room;
@@ -48,9 +50,9 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
   const [micMuted, setMicMuted] = useState(() => sessionStorage.getItem('kinesia_join_muted') === 'true');
   const [audioMuted, setAudioMuted] = useState(false);
   const [transcripts, setTranscripts] = useState<TranscriptTurn[]>([]);
-  const [caption, setCaption] = useState<TranscriptTurn | null>(null);
+  const [peerCaptions, setPeerCaptions] = useState<Record<string, TranscriptTurn>>({});
   const [ownCaption, setOwnCaption] = useState('');
-  const [speakingId, setSpeakingId] = useState<string | number | null>(null);
+  const [speakingIds, setSpeakingIds] = useState<Set<string>>(new Set());
   const [drawer, setDrawer] = useState(false);
   const [original, setOriginal] = useState(true);
   const [text, setText] = useState('');
@@ -60,8 +62,13 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
   const [elapsed, setElapsed] = useState(0);
   const actions = useRef<{ playEncoded: (url: string) => void; cancelAudio: () => void } | null>(null);
   const completed = useRef(false);
-  const speakingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scroll = useRef<HTMLDivElement | null>(null);
+  const rememberCaption = (turn: TranscriptTurn) => setPeerCaptions((previous) => {
+    const key = String(turn.speaker_id);
+    const old = previous[key];
+    if (old?.audio_end_ms != null && turn.audio_end_ms != null && old.audio_end_ms > turn.audio_end_ms) return previous;
+    return { ...previous, [key]: turn };
+  });
 
   const finish = (insights: SessionInsights) => {
     if (completed.current) return;
@@ -82,14 +89,16 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
       },
       onParticipantLeft: (id) =>
         setParticipants((previous) => previous.filter((item) => String(item.user_id) !== String(id))),
-      onSpeaking: (id) => {
-        setSpeakingId(id);
-        if (speakingTimer.current) clearTimeout(speakingTimer.current);
-        speakingTimer.current = setTimeout(() => setSpeakingId(null), 2200);
+      onSpeaking: (id, _name, active = true) => {
+        setSpeakingIds((previous) => {
+          const next = new Set(previous);
+          if (active) next.add(String(id)); else next.delete(String(id));
+          return next;
+        });
       },
       onCaption: (turn) => {
         if (String(turn.speaker_id) === String(currentUser.id)) setOwnCaption(turn.original_text);
-        else if (turn.localized_text && turn.listening_lang === listeningLang) setCaption(turn);
+        else if (turn.localized_text && turn.listening_lang === listeningLang) rememberCaption(turn);
       },
       onTurn: (turn) => {
         const id = String(turn.turn_id ?? turn.id);
@@ -101,43 +110,45 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
         });
         if (String(turn.speaker_id) === String(currentUser.id)) setOwnCaption('');
         else {
-          setCaption(turn);
+          const localized = turn.translations?.[listeningLang] || (turn.listening_lang === listeningLang ? turn.localized_text : '');
+          if (localized) rememberCaption({ ...turn, localized_text: localized });
           if (turn.audio_data_url) actions.current?.playEncoded(turn.audio_data_url);
         }
       },
       onSessionConcluded: (insights) => finish(insights as SessionInsights),
       onTranscriptsCleared: () => {
         setTranscripts([]);
-        setCaption(null);
+        setPeerCaptions({});
+        savedMoments.refresh();
         onToast('Conversation transcript cleared', 'info');
       },
     },
     { speakingLang, listeningLang, micMuted, audioMuted }
   );
   actions.current = live;
+  const savedMoments = useSavedMoments(room.room_code, (message) => onToast(message, 'error'), live.connected && room.record_session !== false);
 
   useEffect(() => {
     sessionStorage.setItem('kinesia_join_muted', String(micMuted));
   }, [micMuted]);
 
   useEffect(() => {
-    let cancelled = false;
     setTranscripts([]);
-    setCaption(null);
+    setPeerCaptions({});
     completed.current = false;
-    roomService
-      .getTranscripts(room.room_code)
-      .then((history) => {
-        if (!cancelled) setTranscripts((current) => mergeTranscriptHistory(history, current, listeningLang));
-      })
-      .catch(() => {}); // Membership may still be joining; live turns remain available.
     const timer = setInterval(() => setElapsed((value) => value + 1), 1000);
     return () => {
-      cancelled = true;
       clearInterval(timer);
-      if (speakingTimer.current) clearTimeout(speakingTimer.current);
     };
   }, [room.room_code, currentUser.id]);
+  useEffect(() => {
+    if (!live.connected) { setSpeakingIds(new Set()); return; }
+    let cancelled = false;
+    roomService.getTranscripts(room.room_code).then((history) => {
+      if (!cancelled) setTranscripts((current) => mergeTranscriptHistory(history, current, listeningLang));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [room.room_code, live.connected, listeningLang]);
   useEffect(() => {
     if (drawer) scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' });
   }, [drawer, transcripts]);
@@ -191,7 +202,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
       else if (modal === 'clear') {
         await roomService.clearTranscripts(room.room_code);
         setTranscripts([]);
-        setCaption(null);
+        setPeerCaptions({});
       } else {
         await roomService.leaveRoom(room.room_code).catch(() => {});
         props.onLeaveRoom();
@@ -293,7 +304,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
               value={listeningLang}
               onChange={(event) => {
                 live.cancelAudio();
-                setCaption(null);
+                setPeerCaptions({});
                 props.onUpdateListeningLang(event.target.value);
               }}
               className="max-w-[120px] rounded-lg border border-border bg-surface-1 px-2 py-1.5 text-xs text-ink-primary focus:border-accent"
@@ -340,8 +351,8 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
       )}
 
       <div className="relative flex min-h-0 flex-1">
-        <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-          <div className="flex flex-1 flex-col items-center justify-center gap-5 px-4 py-6 sm:px-8">
+        <main className="flex min-w-0 flex-1 flex-col overflow-y-auto [overflow-anchor:none]">
+          <div className="flex shrink-0 flex-col items-center gap-5 px-4 pb-4 pt-6 sm:px-8">
             <div
               className={cn(
                 'grid w-full gap-3 sm:gap-4',
@@ -356,15 +367,14 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                 const self = String(participant.user_id) === String(currentUser.id);
                 const active = self
                   ? live.isSpeaking && !micMuted
-                  : String(speakingId) === String(participant.user_id);
+                  : speakingIds.has(String(participant.user_id)) && !participant.is_muted;
                 const muted = self ? micMuted : participant.is_muted;
                 return (
                   <motion.div
                     key={participant.user_id}
                     data-testid="participant-card"
-                    layout
                     className={cn(
-                      'relative flex min-w-0 min-h-[190px] flex-col items-center justify-center rounded-2xl border bg-surface-1 p-5 transition-colors sm:min-h-[230px]',
+                      'relative flex min-w-0 min-h-[150px] flex-col items-center justify-center rounded-2xl border bg-surface-1 p-4 pt-8 transition-colors sm:min-h-[165px]',
                       active ? 'border-accent/80 bg-accent/5 shadow-glow' : 'border-border'
                     )}
                   >
@@ -381,7 +391,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                     </span>
                     <div
                       className={cn(
-                        'mb-4 flex h-16 w-16 items-center justify-center rounded-2xl text-xl font-bold text-white sm:h-20 sm:w-20',
+                        'mb-3 flex h-12 w-12 items-center justify-center rounded-xl text-base font-bold text-white sm:h-14 sm:w-14',
                         active && 'ring-4 ring-accent/15'
                       )}
                       style={{ backgroundColor: participant.avatar_color || '#10B981' }}
@@ -427,8 +437,8 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
             )}
           </div>
 
-          <section aria-label="Live captions" className="mx-auto mb-4 w-full max-w-3xl shrink-0 px-4 sm:px-6">
-            <div className="rounded-2xl border border-border bg-surface-0/85 p-4 sm:p-5">
+          <section aria-label="Live captions" className="mx-auto my-auto w-full max-w-4xl flex-1 px-4 py-6 sm:px-6">
+            <div className="min-h-[220px] rounded-3xl border border-border bg-gradient-to-b from-surface-1 to-surface-0 p-5 shadow-elevation-1 sm:p-7">
               <div className="mb-3 flex items-center justify-between gap-2 text-2xs text-ink-muted">
                 <span className="flex items-center gap-2">
                   <span
@@ -437,7 +447,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                       live.isPlayingAudio ? 'bg-accent animate-pulse' : 'bg-accent/50'
                     )}
                   />
-                  {caption ? `${caption.speaker_name} · ${langLabel(listeningLang)}` : 'Live captions'}
+                  Live captions · {langLabel(listeningLang)}
                 </span>
                 <button
                   onClick={() => setOriginal(!original)}
@@ -448,23 +458,17 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                   Show original text {original && <Check size={11} />}
                 </button>
               </div>
-              <p
-                role="status"
-                aria-live="polite"
-                className={cn(
-                  'min-h-[28px] text-base leading-relaxed sm:text-lg',
-                  !caption && 'text-ink-faint'
-                )}
-              >
-                {caption?.localized_text ||
-                  caption?.original_text ||
-                  'Translations appear here as the conversation unfolds.'}
-              </p>
-              {original && caption?.original_text && caption.original_text !== caption.localized_text && (
-                <p className="mt-2 border-t border-border-subtle pt-2 text-xs leading-relaxed text-ink-muted">
-                  {caption.original_text}
-                </p>
-              )}
+              <div role="status" aria-live="polite" className="space-y-5">
+                {Object.values(peerCaptions).slice(-3).map((turn) => <div key={String(turn.speaker_id)} className="border-l-2 border-accent/40 pl-4">
+                  <p className="mb-2 text-2xs font-medium text-accent">{turn.speaker_name}</p>
+                  <p className="whitespace-pre-wrap text-lg leading-relaxed text-ink-primary sm:text-2xl">{turn.localized_text || turn.original_text}</p>
+                  {original && turn.original_text !== turn.localized_text && <p className="mt-3 text-xs leading-relaxed text-ink-muted">{turn.original_text}</p>}
+                </div>)}
+                {Object.keys(peerCaptions).length === 0 && <div className="py-7">
+                  <p className="font-display text-xl text-ink-secondary sm:text-2xl">A conversation, in your language.</p>
+                  <p className="mt-3 text-sm leading-relaxed text-ink-muted">Translations appear here as people speak. Original words are always one tap away.</p>
+                </div>}
+              </div>
               {ownCaption && (
                 <p className="mt-3 text-xs text-ink-muted">
                   <span className="font-medium text-accent">You: </span>
@@ -526,26 +530,13 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                     Live captions may update while someone speaks.
                   </p>
                 )}
-                {transcripts.map((turn, index) => (
-                  <div
-                    key={turn.turn_id ?? turn.id ?? index}
-                    className="rounded-xl border border-border bg-surface-0 p-3"
-                  >
-                    <div className="mb-2 flex items-center justify-between text-2xs">
-                      <span className="font-medium text-accent">{turn.speaker_name}</span>
-                      <span className="text-ink-faint">{langShort(turn.source_lang)}</span>
-                    </div>
-                    <p className="text-sm leading-relaxed">{turn.localized_text || turn.original_text}</p>
-                    {original && turn.original_text !== turn.localized_text && (
-                      <p className="mt-2 text-xs leading-relaxed text-ink-muted">{turn.original_text}</p>
-                    )}
-                    {turn.confidence != null && turn.confidence < 0.75 && (
-                      <p className="mt-2 text-2xs text-warn">
-                        Low recognition confidence — confirm important details.
-                      </p>
-                    )}
-                  </div>
-                ))}
+                {transcripts.map((turn, index) => {
+                  const id = String(turn.turn_id ?? turn.id ?? index);
+                  return <TranscriptItem key={id} turn={turn} language={listeningLang} original={original}
+                    saved={savedMoments.saved.has(id)} busy={savedMoments.busy.includes(id)}
+                    disabled={room.record_session === false}
+                    onToggle={() => void savedMoments.toggle(room.room_code, id, savedMoments.saved.has(id))} />;
+                })}
               </div>
             </motion.aside>
           )}
@@ -600,7 +591,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
               onClick={() => setModal(isHost ? 'end' : 'leave')}
               leftIcon={<PhoneOff size={16} />}
             >
-              {isHost ? 'End meeting' : 'Leave'}
+              {isHost ? 'End conversation' : 'Leave'}
             </Button>
           </div>
         </div>
@@ -619,7 +610,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
             >
               <h2 className="text-base font-semibold">
                 {modal === 'end'
-                  ? 'End the meeting for everyone?'
+                  ? 'End this conversation for everyone?'
                   : modal === 'clear'
                     ? 'Clear the room transcript?'
                     : 'Leave this conversation?'}

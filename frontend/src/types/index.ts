@@ -57,6 +57,7 @@ export interface TranscriptTurn {
   audio_data_url?: string;
   timestamp?: number;
   entities?: Record<string, string[]>;
+  audio_end_ms?: number;
 }
 
 export interface SessionInsights {
@@ -64,6 +65,41 @@ export interface SessionInsights {
   executive_summary: string;
   action_items: string[];
   key_points: string[];
+}
+
+export interface RecapPoint {
+  text: string;
+  source_ids: string[];
+  evidence: string;
+}
+
+export interface ConversationRecap {
+  status: 'not_generated' | 'queued' | 'generating' | 'ready' | 'failed';
+  configured: boolean;
+  available?: boolean;
+  conversation_active?: boolean;
+  recording_enabled?: boolean;
+  language: string;
+  error?: string;
+  result?: {
+    summary: RecapPoint;
+    highlights: RecapPoint[];
+    follow_ups: RecapPoint[];
+    open_questions: RecapPoint[];
+  };
+}
+
+export interface SavedMoment {
+  turn_id: string;
+  room_id: string;
+  room_code: string;
+  title: string;
+  speaker_name: string;
+  original_text: string;
+  source_lang: string;
+  translations: Record<string, string>;
+  timestamp: number;
+  created_at: number;
 }
 
 export type ViewState = 'auth' | 'welcome' | 'workspace' | 'history' | 'profile' | 'lobby' | 'dialogue' | 'insights';

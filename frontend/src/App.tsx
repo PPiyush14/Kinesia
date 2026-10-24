@@ -169,7 +169,7 @@ export default function App() {
     setRoom(r);
     localStorage.setItem('kinesia_room_code', r.room_code);
     setInsights(null);
-    setView('lobby');
+    setView(r.is_active === false || r.status === 'ended' ? 'history' : 'lobby');
   };
 
   const handleUserUpdated = (updatedUser: User) => {
@@ -334,6 +334,7 @@ export default function App() {
                   onJoinWithCode={() => setView('workspace')}
                   onOpenWorkspace={() => setView('workspace')}
                   onOpenProfile={() => setView('profile')}
+                  onResumeConversation={handleSelectRoom}
                 />
               </motion.div>
             )}
@@ -364,6 +365,9 @@ export default function App() {
                 transition={{ duration: 0.2 }}
               >
                 <HistoryView
+                  initialRoomCode={room?.room_code}
+                  language={listeningLang}
+                  currentUserId={user?.id}
                   onSelectRoom={handleSelectRoom}
                   onBackToHome={() => setView('welcome')}
                   onToast={showToast}
@@ -421,6 +425,7 @@ export default function App() {
                 transition={{ duration: 0.2 }}
               >
                 <InsightsView
+                  language={listeningLang}
                   room={room}
                   insights={insights}
                   onReturnToWorkspace={() => {

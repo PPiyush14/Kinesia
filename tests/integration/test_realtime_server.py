@@ -33,14 +33,16 @@ class FakeSoniox:
 
 class FakeCartesia:
     def __init__(self, config): pass
-    async def synthesize(self, text, language, context_id, chunk):
+    async def synthesize(self, text, language, context_id, chunk, **kwargs):
         await chunk(b"\0\0" * 100, 0, 24000)
+    async def finish_context(self, *args): pass
+    async def cancel_context(self, *args): pass
     async def close(self): pass
 
 
 @pytest.fixture
 def realtime_client(sample_config):
-    config = replace(sample_config, translation_provider="soniox", tts_provider="cartesia")
+    config = replace(sample_config, translation_provider="soniox", tts_provider="cartesia", groq_api_key="test-recap-key")
     with patch("backend.rooms.coordinator.EntityExtractor", return_value=None), \
          patch("backend.dashboard_server.EntityExtractor", return_value=None), \
          patch("backend.realtime_rooms.SonioxStream", FakeSoniox), \
@@ -246,3 +248,84 @@ def test_failed_stream_setup_does_not_leave_a_ghost_participant(realtime_client)
         assert socket.receive()["code"] == 1011
     assert runtime.sessions == {}
     assert client.get(f"/api/v1/rooms/{code}/participants", headers=headers).json()["data"] == []
+
+
+def test_saved_moments_require_membership_and_are_private(realtime_client):
+    from backend.db.rooms import add_transcript
+    client = realtime_client
+    _, headers = user(client, "bookmark_owner")
+    guest, guest_headers = user(client, "bookmark_guest")
+    room = client.post("/api/v1/rooms", headers=headers, json={"title": "Personal moments"}).json()["data"]
+    code = room["room_code"]
+    turn = add_transcript(room["id"], room["host_id"], "Host", "Remember tomorrow at six.", "en", {})
+    path = f"/api/v1/rooms/{code}/moments"
+    assert client.post(path, headers=guest_headers, json={"turn_id": turn["id"]}).status_code == 403
+    with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+        authenticate(socket, guest)
+        assert client.post(path, headers=guest_headers, json={"turn_id": turn["id"]}).status_code == 200
+        assert len(client.get(path, headers=guest_headers).json()["data"]) == 1
+        assert client.get(path, headers=headers).json()["data"] == []
+        assert client.post(path, headers=guest_headers, json={"turn_id": "not-in-this-room"}).status_code == 404
+        assert client.get("/api/v1/moments").status_code == 401
+        assert len(client.get("/api/v1/moments", headers=guest_headers).json()["data"]) == 1
+        assert client.delete(path + "/" + turn["id"], headers=guest_headers).status_code == 200
+        assert client.get(path, headers=guest_headers).json()["data"] == []
+
+
+def test_recap_is_explicit_post_call_and_sources_remain_access_controlled(realtime_client):
+    from backend.db.rooms import add_transcript
+    from tests.unit.test_conversation_features import result
+    client = realtime_client
+    _, headers = user(client, "ai_owner")
+    _, outsider = user(client, "ai_outsider")
+    room = client.post("/api/v1/rooms", headers=headers, json={"title": "Tea at six"}).json()["data"]
+    code = room["room_code"]
+    turn = add_transcript(room["id"], room["host_id"], "Host", "Tomorrow at six, not five.", "en", {})
+    path = f"/api/v1/rooms/{code}/recap"
+    assert client.get(path, headers=outsider).status_code == 403
+    assert client.post(path, headers=headers, json={"language": "en"}).status_code == 409
+    with patch.object(client.app.state.recaps.generator, "generate", return_value=result(turn["original_text"], turn["id"])) as model:
+        assert client.post(f"/api/v1/rooms/{code}/end", headers=headers, json={}).status_code == 200
+        model.assert_not_called()
+        response = client.post(path, headers=headers, json={"language": "en"})
+        assert response.status_code == 200
+        client.app.state.recaps.pool.submit(lambda: None).result(3)
+        ready = client.get(path, headers=headers).json()["data"]
+        assert ready["status"] == "ready"
+        assert ready["result"]["summary"]["source_ids"] == [turn["id"]]
+        assert client.post(path, headers=headers, json={"language": "en"}).json()["data"]["job_id"] == ready["job_id"]
+        assert model.call_count == 1
+    assert client.delete(f"/api/v1/rooms/{code}/transcripts", headers=headers).status_code == 200
+    assert client.get(path, headers=headers).json()["data"]["status"] == "not_generated"
+
+
+def test_new_speech_after_reconnect_does_not_overwrite_previous_turn(realtime_client):
+    client = realtime_client
+    token, headers = user(client, "reconnect_transcript")
+    room = client.post("/api/v1/rooms", headers=headers, json={"title": "Two separate hellos"}).json()["data"]
+    code = room["room_code"]
+    for _ in range(2):
+        with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+            authenticate(socket, token)
+            socket.send_bytes(b"\0\0" * 1600)
+            receive_event(socket, "turn")
+    history = client.get(f"/api/v1/rooms/{code}/transcripts", headers=headers).json()["data"]
+    assert len(history) == 2 and history[0]["id"] != history[1]["id"]
+
+
+def test_saving_disabled_cannot_create_moments_or_send_transcript_for_ai_recap(realtime_client):
+    client = realtime_client
+    token, headers = user(client, "no_saved_text")
+    room = client.post("/api/v1/rooms", headers=headers, json={"title": "Temporary conversation", "record_session": False}).json()["data"]
+    code = room["room_code"]
+    with patch.object(client.app.state.recaps.generator, "generate") as model:
+        with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+            authenticate(socket, token)
+            socket.send_bytes(b"\0\0" * 1600)
+            turn = receive_event(socket, "turn")
+            assert client.post(f"/api/v1/rooms/{code}/moments", headers=headers, json={"turn_id": turn["turn_id"]}).status_code == 409
+            assert client.post(f"/api/v1/rooms/{code}/end", headers=headers, json={}).status_code == 200
+        assert client.post(f"/api/v1/rooms/{code}/recap", headers=headers, json={"language": "en"}).status_code == 409
+        assert client.get(f"/api/v1/rooms/{code}/transcripts", headers=headers).json()["data"] == []
+        assert client.get(f"/api/v1/rooms/{code}/moments", headers=headers).json()["data"] == []
+        model.assert_not_called()

@@ -1,136 +1,143 @@
-# Soniox + Cartesia meetings on Render
+# Kinesia conversations on Render
 
-The user's current deployment is **one Docker web service serving both the
-frontend and backend**, plus Render PostgreSQL. The built frontend is committed
-under `backend/web`; the existing Dockerfile serves it with the API and WebSocket
-on the same public origin. No separate frontend service or `VITE_API_BASE_URL`
-is required for that setup. The separate-frontend section below is optional.
+The current deployment is **one Docker web service serving both frontend and
+backend**, plus Render PostgreSQL. The built frontend is committed under
+`backend/web`; the existing Dockerfile serves the UI, API, and WebSocket on the
+same public origin. Keep this setup. A separate frontend service or
+`VITE_API_BASE_URL` is unnecessary for the combined service.
 
-The meeting pipeline is browser AudioWorklet → authenticated backend WebSocket
-→ Soniox recognition and native speech translation → Cartesia streaming TTS
-→ listener PCM playback. Provider keys stay on the backend. Final tokens drive
-speech; partial hypotheses only update captions. Stable stream IDs and sequence
-numbers prevent replay. Revised transcript rows merge by source audio time and
-stable row ID, preserving legitimate repeated sentences.
+Live speech follows browser AudioWorklet → authenticated backend WebSocket →
+Soniox recognition/native translation → Cartesia streaming TTS → listener PCM
+playback. Partial recognition updates captions; only stable text is voiced.
+Groq is separate and runs only for explicitly requested, post-conversation AI
+recaps. Provider keys stay on the backend.
 
-The existing accounts, rooms, passcodes, PostgreSQL tables, REST endpoints, and
-legacy SSE transport are retained. The meeting screen keeps the dark/green/cyan
-theme with language controls, participant activity, captions, a transcript drawer,
-export, audio recovery, and mobile controls.
+## Environment
 
-## Backend service
-
-Keep the existing service and Docker deployment. Its existing command
-`python -m backend.dashboard_server` selects the ASGI streaming server when
-`TRANSLATION_PROVIDER=soniox`. A native Python service can use the same command
-after `pip install -r requirements.txt`.
-
-Set these in the backend service's **Environment** tab before manual deployment:
+Keep the existing Docker service and its command,
+`python -m backend.dashboard_server`. With `TRANSLATION_PROVIDER=soniox`, this
+selects the ASGI streaming server. Set the following in Render's Environment tab:
 
 | Variable | Value |
 | --- | --- |
-| `SONIOX_API_KEY` | Your current Soniox key |
-| `CARTESIA_API_KEY` | Your current Cartesia key |
-| `DATABASE_URL` | The Render PostgreSQL **internal** connection URL, copied privately from the database service |
-| `JWT_SECRET` | A persistent random secret of at least 32 characters |
+| `SONIOX_API_KEY` | Your Soniox key |
+| `CARTESIA_API_KEY` | Your Cartesia key |
+| `GROQ_API_KEY` | Your separate Groq key; required only for AI recaps |
+| `DATABASE_URL` | Render PostgreSQL **internal** URL, copied privately from the database service |
+| `JWT_SECRET` | Your existing persistent random secret, at least 32 characters |
 | `TRANSLATION_PROVIDER` | `soniox` |
-| `TTS_PROVIDER` | `cartesia` (replace an old `edge` setting) |
+| `TTS_PROVIDER` | `cartesia` |
 | `SONIOX_MODEL` | `stt-rt-v5` |
 | `CARTESIA_MODEL_ID` | `sonic-3.6-2026-08-27` |
 | `CARTESIA_VERSION` | `2026-08-14` |
 | `CARTESIA_VOICE_ID` | `95d51f79-c397-46f9-b49a-23763d3eaa2d`, or your compatible multilingual voice |
-| `CORS_ORIGINS` | Your frontend HTTPS origin, without a trailing slash; comma-separated if needed |
+| `HOST` | `0.0.0.0` |
 
-Generate a JWT secret locally, for example with
-`python -c "import secrets; print(secrets.token_urlsafe(48))"`, and paste the
-output only into Render. Preserve it across deployments to keep existing logins
-valid. Rotate the database password that was shared in chat and copy its new
-internal URL into Render. The internal hostname is for services on Render's
-private network; local tests use an isolated SQLite database instead.
+Optional defaults: `GROQ_RECAP_MODEL=openai/gpt-oss-120b`,
+`SPEECH_CLAUSE_WAIT_MS=350`, `SONIOX_MAX_ENDPOINT_DELAY_MS=1000`,
+`CARTESIA_SAMPLE_RATE=24000`, and `CARTESIA_SPEED=1.0`. Leave emotion neutral.
+See [.env.example](../.env.example) for the full configuration.
+`CARTESIA_VOICE_MAP` accepts language-to-voice JSON overrides. Old
+`CHANNEL_1_CARTESIA_*` / `CHANNEL_2_CARTESIA_*` overrides take precedence over
+global settings; remove them if you intend to use the global voice/model.
 
-Let Render supply `PORT`; bind to `HOST=0.0.0.0`. Keep the backend and database
-in a compatible Render region/network. Set the health check path to
-`/api/v1/health`. On Render the server rejects missing PostgreSQL configuration
-or a missing/short JWT secret, avoiding accidental ephemeral production storage.
+Let Render supply `PORT`. Keep the service and database on a compatible private
+network/region. Health check: `/api/v1/health`. Render startup rejects missing
+PostgreSQL configuration and missing/short JWT secrets. Preserve `JWT_SECRET`
+across deploys to preserve existing logins. Internal database hostnames are for
+Render services; local tests use isolated SQLite.
 
-Optional tuning is documented in [.env.example](../.env.example). Start with
-`SONIOX_MAX_ENDPOINT_DELAY_MS=1000`, `CARTESIA_SPEED=1.0`, and neutral emotion.
-`CARTESIA_VOICE_MAP` accepts a JSON object of language-to-voice overrides.
-Remove old `CHANNEL_1_CARTESIA_*` / `CHANNEL_2_CARTESIA_*` overrides if you want
-the global Cartesia model and voice settings to apply; compatibility overrides
-still take precedence.
+Local `.env` is excluded from Git and Docker; updating it does **not** update
+Render. Never put provider keys, JWT secrets, or database URLs into `VITE_*`.
+For an optional separate frontend, restrict `CORS_ORIGINS` to its HTTPS origin.
 
-Use **one worker and one backend instance**. Room queues and live audio routes
-are process-local. The current admission limits are eight participants and four
-listening languages per room, configurable with `REALTIME_MAX_LANGUAGES` for
-languages. This is a guardrail, not a scale guarantee: Soniox opens a stream per
-speaker/target language and shares its result among listeners. Provider concurrency
-quotas and credits can impose lower practical limits. No Redis or paid Render
-upgrade is required for the current single-instance setup.
+## Manual deployment and call test
 
-## Optional separate frontend service
+1. Add `GROQ_API_KEY` to the existing Render service; retain your working speech,
+   database, and JWT settings. Manually deploy **latest main**. Its committed
+   frontend bundle is included, so this updates both UI and backend.
+2. Open the health URL and let the free instance wake up. Expect
+   `transport: "websocket"`, `database: "postgresql"`,
+   `speech_configured: true`, and `recap_configured: true` when Groq is set.
+   These booleans check configuration presence, not provider validity or credits.
+3. Use two accounts on different devices/browser profiles with headphones.
+   Test English↔Hindi, short turns, long turns, names, numbers, negation,
+   self-corrections, repeated sentences, and mixed-language speech. Compare
+   original captions with translation to distinguish recognition errors.
+4. Test overlapping speech, intentional "hmm", coughs, and deliberate
+   interruptions. Acknowledgements should remain audible; noise alone should
+   not cancel playback. Sustained recognized speech can cancel stale audio
+   from other speakers in that room. Check whether the delay feels natural.
+5. Test mute, output mute, listen-only, language switching, denied permission
+   and retry, network recovery, refresh, and joining the same account in a
+   second tab. The newer tab owns the subscription.
+6. Save a transcript line with **Save moment**. End the room as host and verify
+   capture/playback stop and the conversation review opens. Choose **Generate
+   AI recap**. Check language, corrections, follow-ups, quotes, source links,
+   export, and reload persistence. Ending the room itself does not wait for Groq.
+7. Reopen **History & Moments**. Bookmarks are private per account. Individual
+   and bulk history removal affect only the caller; saved moments and shared
+   conversations remain. Explicit rejoining restores a hidden history entry.
+8. Leave as host, rejoin after a friend, and verify **End conversation** remains
+   available to the persisted creator. Guests cannot end the room or clear
+   everyone's transcript. Shared transcript clearing invalidates recaps and
+   bookmarks for everyone, and the UI explains that distinction.
+9. Test passcode protection and a room with recording disabled. Non-recorded
+   conversations have no persisted transcript, saved moments, or AI recaps.
+   Verify missing Groq configuration and free-tier failures show a retryable
+   error rather than invented AI output.
 
-Set `VITE_API_BASE_URL` to the backend HTTPS **origin**, for example
-`https://your-backend.onrender.com`, without `/api` or a trailing slash. This is a
-build-time setting: rebuild the frontend after changing it. The client derives
-the matching `wss://` room endpoint from the same origin.
+No Render deployment or production database operation was performed during local
+verification. PostgreSQL connectivity, real acoustic echo, mobile device behavior,
+and complete microphone-to-listener latency still need this deployment test.
 
-Use Node 20.19+ or a supported newer LTS. From the repository root:
+## Behavior and limits
+
+Use **one worker and one backend instance**: live room state is process-local.
+Current admission limits are eight participants and four listening languages
+(`REALTIME_MAX_LANGUAGES`). These are guardrails, not capacity guarantees.
+Soniox opens a stream per speaker/target language, shared among listeners.
+Provider concurrency limits and credits can lower practical capacity.
+
+Microphone PCM travels in 100-ms frames. Stable word-safe clauses can be released
+after a 350-ms wait when enough finalized text exists; Cartesia continues the
+same speech context across clauses in an utterance. Partial STT is never voiced.
+Translation still needs linguistic context. Bounded queues visibly skip stale
+audio during overload. No fixed accuracy or sub-second end-to-end latency is
+promised.
+
+Interruption handling requires sustained microphone activity plus fresh recognized
+text. Short acknowledgements are translated/spoken but do not erase another
+speaker's audio. Local speech gently lowers incoming playback. Intent detection
+is a conservative heuristic; already-played sound cannot be undone.
+
+Startup adds `saved_moments` and `conversation_recaps` tables without replacing
+existing tables. Recaps run in one separate worker, with at most three pending
+jobs and persisted status. Restarted jobs become retryable failures.
+Large transcripts are processed in batches rather than silently truncated.
+The current limit is 48 batches of roughly 5,500 UTF-8 bytes, with a generation
+deadline and explicit errors. Free-tier rate limits may delay or reject requests.
+Source IDs and exact quotes are validated; semantic accuracy still requires
+review. Saved-moment lists return up to 500 entries.
+
+The legacy insights endpoint retains extractive notes for API compatibility.
+Typed translation uses the existing Cartesia-to-Soniox voice bridge, which is
+slower and can change wording. Live microphone speech is the primary path.
+
+## Optional separate frontend
+
+Only if you deliberately use a separate static service, set `VITE_API_BASE_URL`
+to the backend HTTPS **origin**, without `/api` or a trailing slash, and rebuild.
+The client derives its `wss://` endpoint from that origin. Use Node 20.19+ or a
+supported newer LTS:
 
 ```sh
 npm --prefix frontend ci --include=dev
 npm run build
 ```
 
-The publish directory is `backend/web`. Keep/add the static site's SPA rewrite
-`/*` → `/index.html`. The build includes `/audio-worklet.js`; it must be publicly
-served from the frontend origin. Never add speech keys, the database URL, or the
-JWT secret to a `VITE_*` variable. Local `.env` is excluded from Git and Docker.
-
-## Deploy and test
-
-1. Manually deploy the backend after saving its environment. Open its health URL
-   and let the free instance wake up. Expect `transport: "websocket"`,
-   `database: "postgresql"`, and `speech_configured: true`. The last field checks
-   configuration presence, not provider validity or credit balance.
-2. Manually rebuild/deploy the frontend with the backend origin above.
-3. Use two browser profiles or devices with different accounts and headphones.
-   Create a room, join from the second account, and allow microphone access.
-   Set one listener to Hindi and the other to English. Speak normal short turns,
-   then longer sentences. Verify captions and translated speech in both directions.
-4. Include names, numbers, negation, mixed languages, and repeated sentences.
-   Repeating a sentence should produce another turn; a single turn should not
-   replay audio when its transcript is revised. Check source captions separately
-   from the translation to identify recognition versus translation errors.
-5. Test mute/unmute, listen-only joining, output mute, language changes, permission
-   denial/retry, network loss/recovery, refreshing a tab, and another tab joining
-   the same account. The newer tab owns the subscription; the older tab stops.
-6. End the room as host; verify microphones/playback stop and notes appear.
-   Reopen history after refresh. Test a passcode room and a room with recording
-   disabled. Verify non-hosts cannot end the room or clear the shared transcript.
-   Each participant can remove an individual room or all history entries from
-   their own account without deleting anyone else's transcript, notes or live
-   session. Explicit rejoining restores the account's room entry.
-
-Free-tier cold starts are expected. A temporarily unavailable backend preserves
-the saved login and offers retry. Active streaming quality, real acoustic echo,
-device compatibility, Render PostgreSQL connectivity, and end-to-end speech
-latency still require the manual deployment test. No remote database mutation or
-Render deployment was performed during local verification.
-
-## Feature and latency limits
-
-With only these two providers, notes are **extractive transcript excerpts** and
-possible quoted commitments. They do not invent owners/deadlines or call a third
-LLM. Optional spaCy entities require its model; they are absent if it is not
-installed. Typed text translation is preserved through a Cartesia-to-Soniox voice
-bridge, which is slower and can change wording; live microphone speech is the
-primary path. Both speech APIs require available credits.
-
-Microphone PCM travels in 100-ms frames. Speech starts from stable clauses or a
-final endpoint; translation needs linguistic context. Playback and upload queues
-are bounded; stale output is discarded visibly instead of replayed much later.
-No fixed accuracy or sub-second end-to-end latency claim is made.
+Publish `backend/web`; configure the SPA rewrite `/*` → `/index.html`.
+`/audio-worklet.js` must be served publicly from the frontend origin.
 
 ## Reproduce local checks
 
@@ -143,26 +150,26 @@ npm --prefix frontend exec playwright install chromium
 npm --prefix frontend run test:e2e
 ```
 
-Activate `.venv` and install pytest first. Browser tests use mocked room/provider
-events and a fake browser microphone, including real AudioWorklet capture; they
-need no API keys or production database. On Windows, installed Chrome can be used
-with `$env:PLAYWRIGHT_CHANNEL='chrome'` before the browser command.
+Activate `.venv` and install test dependencies first. Browser tests use mocked
+room/provider events and a fake browser microphone, including AudioWorklet
+capture. On Windows, installed Chrome can be used with
+`$env:PLAYWRIGHT_CHANNEL='chrome'` before running the browser suite.
 
-An additional optional check consumes a few seconds of provider credits and uses
-only synthetic speech, without connecting to the database:
+Opt-in provider checks consume credits/quota using synthetic content only;
+they do not access the database:
 
 ```sh
-python scripts/check_speech_providers.py --live --language hi
+python scripts/check_speech_providers.py --live --language hi --streaming
+python scripts/check_recap_provider.py --live --language hi
 ```
 
-This has successfully exercised Cartesia English synthesis → Soniox English
-recognition/Hindi translation → Cartesia Hindi synthesis using the local keys.
-Its generation timing is not a microphone-to-listener latency measurement.
+Observed on 2026-10-24: the streaming check preserved an intentional acknowledgement,
+a number correction, and negation. Three stable phrases produced first PCM after
+187, 172, and 156 ms respectively, with voiced text matching the complete final
+translation. These timings start **after stable translated text is available**;
+they exclude recognition, Render transport, and browser playback. The synthetic
+Hindi Groq recap took 1,359 ms, with validated quotes and corrected numbers.
+These are individual successful probes, not averages or production benchmarks.
 
-Follow-up verification on 2026-10-24: 98 backend tests passed; 17 frontend unit regressions
-and 8 Chrome browser tests passed; strict TypeScript/Vite production build passed;
-`npm audit` reported zero vulnerabilities. Static checks passed for the new
-streaming modules and tests, plus undefined-name/duplicate-definition checks
-across the backend. The backend suite has one dependency deprecation warning
-from Starlette's httpx test adapter. The repository/build secret scan found no
-local provider keys, credential-bearing PostgreSQL URLs, or private keys.
+See [the audit and verification record](KINESIA_AUDIT_FIXES.md) for final
+automated test results and the preserved working checkpoint.
