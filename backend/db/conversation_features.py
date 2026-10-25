@@ -65,16 +65,16 @@ def queue_recap(room_id, language, job_id, source_hash):
                VALUES (?, ?, ?, ?, 'queued', NULL, NULL, ?)
                ON CONFLICT (room_id, language) DO UPDATE SET job_id=excluded.job_id,
                  source_hash=excluded.source_hash, status='queued', result_json=NULL, error=NULL,
-                 updated_at=excluded.updated_at""", (room_id, language, job_id, source_hash, time.time()),
+                 retry_at=NULL, updated_at=excluded.updated_at""", (room_id, language, job_id, source_hash, time.time()),
         )
 
 
-def finish_recap(job_id, status, result=None, error=None):
+def finish_recap(job_id, status, result=None, error=None, *, retry_at=None):
     with get_db() as db:
         db.execute(
-            """UPDATE conversation_recaps SET status = ?, result_json = ?, error = ?, updated_at = ?
+            """UPDATE conversation_recaps SET status = ?, result_json = ?, error = ?, updated_at = ?, retry_at = ?
                WHERE job_id = ?""",
-            (status, json.dumps(result, ensure_ascii=False) if result else None, error, time.time(), job_id),
+            (status, json.dumps(result, ensure_ascii=False) if result else None, error, time.time(), retry_at, job_id),
         )
 
 

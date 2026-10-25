@@ -8,7 +8,7 @@ import {
   RefreshCw,
   Sparkles,
 } from 'lucide-react';
-import { roomService } from '@/services/api';
+import { ApiError, roomService } from '@/services/api';
 import { Button } from '@/components/ui/Button';
 import type { ConversationRecap, RecapPoint, Room } from '@/types';
 
@@ -26,7 +26,14 @@ export function RecapPanel({
   const [requesting, setRequesting] = useState(false);
   const [retry, setRetry] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [now, setNow] = useState(Date.now());
   const generation = useRef(0);
+  useEffect(() => {
+    if (!recap?.retry_at) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [recap?.retry_at]);
   useEffect(() => {
     const current = ++generation.current;
     let disposed = false;
@@ -40,15 +47,19 @@ export function RecapPanel({
         const result = await roomService.getRecap(room.room_code, language);
         if (disposed || current !== generation.current) return;
         setRecap(result);
+        setError(null);
         if (result.status === 'queued' || result.status === 'generating')
           timer = setTimeout(refresh, 1600);
       } catch (reason) {
-        if (!disposed)
+        if (!disposed) {
           setError(
             reason instanceof Error
               ? reason.message
               : 'The recap could not be loaded.',
           );
+          if (!(reason instanceof ApiError && [401, 403, 404].includes(reason.status)))
+            timer = setTimeout(refresh, 3200);
+        }
       }
     };
     void refresh();
@@ -81,6 +92,10 @@ export function RecapPanel({
   const waiting =
     requesting || recap?.status === 'queued' || recap?.status === 'generating';
   const ready = recap?.status === 'ready' && recap.result;
+  const coolingDown = !!recap?.retry_at && recap.retry_at * 1000 > now;
+  const resumeTime = recap?.retry_at
+    ? new Date(recap.retry_at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '';
   const disabled =
     room.record_session === false ||
     recap?.conversation_active ||
@@ -127,11 +142,12 @@ export function RecapPanel({
             size="sm"
             onClick={() => void generate()}
             loading={waiting}
-            disabled={disabled || !recap}
+            disabled={disabled || !recap || coolingDown}
             leftIcon={<Sparkles size={14} />}
           >
             {waiting
-              ? 'Generating recap'
+              ? coolingDown ? 'Waiting for recap service' : 'Generating recap'
+              : coolingDown ? 'Waiting for quota reset'
               : recap?.status === 'failed'
                 ? 'Retry recap'
                 : 'Generate AI recap'}
@@ -176,12 +192,13 @@ export function RecapPanel({
           </div>
         )}
       </div>
-      {(error || recap?.error) && (
+      {(error || (!waiting && recap?.error)) && (
         <div
           role="alert"
           className="rounded-xl border border-warn/25 bg-warn/5 p-4 text-xs leading-relaxed text-warn"
         >
           {error || recap?.error}
+          {!error && coolingDown && <p className="mt-2">Retry available at {resumeTime}.</p>}
           {error && (
             <button
               className="ml-3 underline"
@@ -199,10 +216,11 @@ export function RecapPanel({
         >
           <Loader2 size={18} className="animate-spin text-accent" />
           <div>
-            Finding the important parts.
+            {coolingDown ? 'Waiting for the recap service.' : 'Finding the important parts.'}
             <p className="mt-1 text-xs text-ink-muted">
-              You can leave this page and come back. Longer conversations may
-              take a little longer.
+              {coolingDown
+                ? `Generation will resume automatically at ${resumeTime}. You can leave this page and come back.`
+                : 'You can leave this page and come back. Longer conversations may take a little longer.'}
             </p>
           </div>
         </div>

@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -22,7 +25,43 @@ from backend.languages import LANGUAGE_DISPLAY_NAMES
 
 
 class RecapError(ValueError):
-    pass
+    def __init__(self, message, *, retry_at=None):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+def duration_seconds(value):
+    """Groq reset headers use durations such as 1m2.5s, not timestamps."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip().replace(" ", "")
+    try:
+        seconds = float(value)
+    except ValueError:
+        if not re.fullmatch(r"(?:\d+(?:\.\d+)?(?:ms|[smhd]))+", value):
+            return None
+        units = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
+        seconds = sum(float(number) * units[unit] for number, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|[smhd])", value))
+    return seconds if math.isfinite(seconds) and 0 <= seconds <= 604800 else None
+
+
+def rate_limit_delay(response, attempt):
+    value = response.headers.get("retry-after", "")
+    delay = duration_seconds(value)
+    if delay is None and value:
+        try:
+            delay = max(0, parsedate_to_datetime(value).timestamp() - time.time())
+        except (ValueError, TypeError, OverflowError):
+            delay = None
+    if delay is None:
+        # Some daily/token limits supply the wait only in the error message.
+        try:
+            message = response.json().get("error", {}).get("message", "")
+            match = re.search(r"try again in ((?:\d+(?:\.\d+)?(?:ms|[smhd])\s*)+)", message, re.IGNORECASE)
+            delay = duration_seconds(match[1]) if match else None
+        except (ValueError, AttributeError, TypeError):
+            delay = None
+    return max(1, delay if delay is not None else min(60, 2 ** attempt * 3))
 
 
 def source_hash(turns):
@@ -107,6 +146,52 @@ class GroqRecapGenerator:
         self.source_valid = lambda: True
         self.deadline = float("inf")
         self.passages = {}
+        self.on_progress = lambda _retry_at, _message: None
+        self.retry_at = 0
+        self.token_budget = None
+
+    def _check(self):
+        if self.stopped.is_set():
+            raise RecapError("The server is restarting. Please retry the recap.")
+        if time.monotonic() >= self.deadline:
+            raise RecapError("This recap took too long. Please retry later; the complete transcript is still available.")
+        if not self.source_valid():
+            raise RecapError("The transcript changed. Please generate a new recap.")
+
+    def _wait(self, delay, message):
+        self._check()
+        self.retry_at = time.time() + delay
+        if time.monotonic() + delay >= self.deadline:
+            raise RecapError("The recap service needs more time to reset its quota. Retry after the time shown below.",
+                             retry_at=self.retry_at)
+        self.on_progress(self.retry_at, message)
+        self.stopped.wait(delay)
+        self._check()  # Never resend a transcript cleared while waiting.
+        self.retry_at = 0
+        self.on_progress(None, None)
+
+    def _pace(self, payload):
+        if self.retry_at > time.time():
+            self._wait(self.retry_at - time.time(), "Waiting for the recap service; generation will resume automatically.")
+        if self.token_budget:
+            remaining, reset_at, limit = self.token_budget
+            # Conservative estimate, not a tokenizer. A provider 429 remains
+            # authoritative when its accounting differs from this estimate.
+            estimate = len(json.dumps(payload, ensure_ascii=False).encode()) // 2 + payload["max_completion_tokens"]
+            if remaining < min(limit, estimate) and reset_at > time.monotonic():
+                self._wait(reset_at - time.monotonic() + 1,
+                           "Waiting for the recap service's token allowance; generation will resume automatically.")
+            self.token_budget = None
+
+    def _observe_budget(self, response):
+        try:
+            remaining = int(response.headers["x-ratelimit-remaining-tokens"])
+            limit = int(response.headers["x-ratelimit-limit-tokens"])
+            reset = duration_seconds(response.headers.get("x-ratelimit-reset-tokens"))
+            if reset is not None and remaining >= 0 and limit > 0:
+                self.token_budget = (remaining, time.monotonic() + reset, limit)
+        except (KeyError, ValueError):
+            self.token_budget = None
 
     def _input(self, data, *, merging):
         if merging:
@@ -123,10 +208,12 @@ class GroqRecapGenerator:
         allowed = {ref: self.passages[ref] for ref in refs}
         if not allowed:
             raise RecapError("There is no saved speech to recap.")
-        content = {"passages": [{"ref": ref, "speaker": passage["speaker"], "text": passage["text"]}
-                                for ref, passage in allowed.items()]}
-        if merging:
-            content["notes"] = data
+        # Map calls already verified each note against these passages. Sending
+        # all raw excerpts again during reduction can exceed free-tier TPM on
+        # its own. Merge cited notes; resolve their evidence on the server.
+        content = {"notes": data} if merging else {"passages": [
+            {"ref": ref, "speaker": passage["speaker"], "text": passage["text"]}
+            for ref, passage in allowed.items()]}
         point = {"type": "object", "additionalProperties": False,
                  "properties": {"text": {"type": "string"}, "source_refs": {
                      "type": "array", "items": {"type": "string", "enum": list(allowed)}}},
@@ -156,60 +243,71 @@ class GroqRecapGenerator:
             "Report what people said, not assumptions about them."
         )
         if merging:
-            instruction += " Combine these cited notes into one recap, using only their provided source_refs and passages."
+            instruction += " Combine these verified cited notes into one recap, using only their provided source_refs."
         payload = {"model": self.config.groq_recap_model,
                    "messages": [{"role": "system", "content": instruction},
                                 {"role": "user", "content": json.dumps(content, ensure_ascii=False)}],
-                   "temperature": 0.2, "max_completion_tokens": 1600,
+                   "temperature": 0.2, "max_completion_tokens": 2400,
                    "response_format": {"type": "json_schema", "json_schema": {
                        "name": "conversation_recap", "strict": True, "schema": schema}}}
         if self.config.groq_recap_model.startswith("openai/gpt-oss"):
             payload["reasoning_effort"] = "low"
         with self.client_factory(timeout=httpx.Timeout(60, connect=8), trust_env=False) as client:
             repaired = False
-            for attempt in range(3):
-                if self.stopped.is_set():
-                    raise RecapError("The server is restarting. Please retry the recap.")
-                if time.monotonic() > self.deadline:
-                    raise RecapError("This recap took too long. Please retry later; the complete transcript is still available.")
-                if not self.source_valid():
-                    raise RecapError("The transcript changed. Please generate a new recap.")
+            rate_retries, transient_retries = 0, 0
+            while True:
+                self._check()
+                self._pace(payload)
                 try:
                     response = client.post("https://api.groq.com/openai/v1/chat/completions", json=payload,
                                            headers={"Authorization": "Bearer " + self.config.groq_api_key})
                 except httpx.HTTPError as exc:
-                    raise RecapError("The recap service could not be reached. Please retry.") from exc
-                if response.status_code == 429 and attempt < 2:
-                    try:
-                        delay = min(60, max(2, float(response.headers.get("retry-after", "30"))))
-                    except ValueError:
-                        delay = 30
-                    self.stopped.wait(delay)
+                    if transient_retries >= 2:
+                        raise RecapError("The recap service could not be reached. Please retry.") from exc
+                    transient_retries += 1
+                    self._wait(2 ** transient_retries, "Reconnecting to the recap service automatically.")
                     continue
+                self._observe_budget(response)
                 if response.status_code == 429:
-                    raise RecapError("The recap service's free-tier limit was reached. Please retry later.")
+                    delay = rate_limit_delay(response, rate_retries)
+                    self.token_budget = None
+                    if rate_retries >= 6:
+                        self.retry_at = time.time() + delay
+                        raise RecapError("The recap service is still rate-limited. Retry after the time shown below.", retry_at=self.retry_at)
+                    rate_retries += 1
+                    self._wait(delay, "Waiting for the recap service's quota to reset; generation will resume automatically.")
+                    continue
+                if (response.status_code >= 500 or response.status_code == 408) and transient_retries < 2:
+                    transient_retries += 1
+                    self._wait(2 ** transient_retries, "The recap service is temporarily busy. Retrying automatically.")
+                    continue
                 if response.status_code >= 400:
                     raise RecapError("The recap service is unavailable. Check its API key and model configuration.")
                 try:
                     choice = response.json()["choices"][0]
-                    if choice.get("finish_reason") != "stop":
-                        raise RecapError("The recap was cut short. Please retry.")
-                    result = json.loads(choice["message"]["content"])
+                    if not isinstance(choice, dict):
+                        raise TypeError("Expected a completion choice.")
                 except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
                     raise RecapError("The recap service returned an invalid response. Please retry.") from exc
                 try:
+                    if choice.get("finish_reason") != "stop":
+                        raise RecapError("The recap was cut short. Please retry.")
+                    result = json.loads(choice["message"]["content"])
                     resolve_references(result, allowed, sources)
-                except RecapError:
-                    if repaired or attempt == 2:
-                        raise
+                except (RecapError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                    if repaired:
+                        if isinstance(exc, RecapError):
+                            raise
+                        raise RecapError("The recap service returned an invalid response. Please retry.") from exc
                     repaired = True
+                    if choice.get("finish_reason") == "length":
+                        payload["max_completion_tokens"] = 3200
                     payload["messages"].append({"role": "user", "content":
                         "The last response could not be verified. Return the requested schema again. "
                         "Each point needs one to three source_refs selected from the provided passages. "
-                        "Respect the item and text length limits; omit unsupported optional points."})
+                        "Keep text concise, respect the item and text length limits; omit unsupported optional points."})
                     continue
                 return result
-        raise RecapError("The recap could not be completed. Please retry.")
 
     def generate(self, turns, language):
         self.passages = {}
@@ -268,7 +366,8 @@ class RecapService:
 
     def status(self, room_id, language):
         result = read_recap(room_id, language) or {"status": "not_generated", "language": language}
-        if result["status"] in {"queued", "generating"} and time.time() - result["updated_at"] > 720:
+        stale_after = 1800 if result["status"] == "queued" else 720
+        if result["status"] in {"queued", "generating"} and time.time() - result["updated_at"] > stale_after:
             finish_recap(result["job_id"], "failed", error="This recap timed out. You can retry it.")
             result = read_recap(room_id, language) or {"status": "not_generated", "language": language}
         result["configured"] = not _is_missing(self.config.groq_api_key)
@@ -286,6 +385,8 @@ class RecapService:
             previous = read_recap(room_id, language)
             if previous and previous["source_hash"] == digest and previous["status"] in {"queued", "generating", "ready"}:
                 return self.status(room_id, language)
+            if previous and previous["source_hash"] == digest and (previous.get("retry_at") or 0) > time.time():
+                return self.status(room_id, language)
             if self.pending >= 3:
                 raise RecapError("Other recaps are being generated. Please try again shortly.")
             job_id = str(uuid.uuid4())
@@ -301,6 +402,8 @@ class RecapService:
                 return bool(current and current["job_id"] == job_id and current["status"] in {"queued", "generating"}
                             and source_hash(get_room_transcripts(room_id)) == digest)
             self.generator.source_valid = source_valid
+            self.generator.on_progress = lambda retry_at, message: finish_recap(
+                job_id, "generating", error=message, retry_at=retry_at)
             if not source_valid():
                 return
             finish_recap(job_id, "generating")
@@ -310,11 +413,12 @@ class RecapService:
             else:
                 finish_recap(job_id, "failed", error="The transcript changed. Please generate a new recap.")
         except RecapError as exc:
-            finish_recap(job_id, "failed", error=str(exc))
+            finish_recap(job_id, "failed", error=str(exc), retry_at=exc.retry_at)
         except Exception:  # noqa: BLE001 - Persist a sanitized failure without provider bodies or keys.
             finish_recap(job_id, "failed", error="The recap could not be completed. Please retry.")
         finally:
             self.generator.source_valid = lambda: True
+            self.generator.on_progress = lambda _retry_at, _message: None
             with self.lock:
                 self.pending -= 1
 

@@ -13,6 +13,7 @@ from backend.conversation_recap import (
     GroqRecapGenerator,
     RecapError,
     RecapService,
+    rate_limit_delay,
     source_passages,
     validate_recap,
 )
@@ -96,11 +97,16 @@ def test_long_multilingual_recap_reduction_keeps_source_bindings_and_complete_in
         payload = json.loads(request.content)
         content = json.loads(payload["messages"][1]["content"])
         (merged if "notes" in content else mapped).append(content)
-        passages = content["passages"]
-        chosen = next((item for item in passages if "Final correction" in item["text"]), passages[0])
         schema = payload["response_format"]["json_schema"]["schema"]
-        assert schema["properties"]["summary"]["properties"]["source_refs"]["items"]["enum"] == [item["ref"] for item in passages]
-        reply = referenced_result("The final corrected number is 42." if "Final correction" in chosen["text"] else "Earlier discussion.", [chosen["ref"]])
+        if "notes" in content:
+            assert "passages" not in content  # Do not resend every raw excerpt.
+            note = next((note for note in content["notes"] if "42" in note["summary"]["text"]), content["notes"][0])
+            reply = note
+        else:
+            passages = content["passages"]
+            chosen = next((item for item in passages if "Final correction" in item["text"]), passages[0])
+            assert schema["properties"]["summary"]["properties"]["source_refs"]["items"]["enum"] == [item["ref"] for item in passages]
+            reply = referenced_result("The final corrected number is 42." if "Final correction" in chosen["text"] else "Earlier discussion.", [chosen["ref"]])
         return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(reply)}}]})
     generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
         client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
@@ -208,6 +214,80 @@ def test_recap_rate_limit_retries_respect_provider_delay_and_auth_errors_are_san
     assert "private-provider-response" not in str(error.value)
 
 
+def test_recap_honors_long_provider_wait_and_recovers_after_three_rate_limits(sample_config):
+    delays, requests, progress = [], [], []
+    class Stop:
+        def is_set(self): return False
+        def wait(self, seconds): delays.append(seconds)
+    def handler(request):
+        requests.append(request)
+        if len(requests) <= 3:
+            return httpx.Response(429, headers={"retry-after": "90"})
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps(referenced_result())}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"), stopped=Stop(),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    generator.on_progress = lambda retry_at, message: progress.append((retry_at, message))
+    assert generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Tomorrow at six, not five."}], "en") == result()
+    assert delays == [90, 90, 90]
+    assert any(retry_at for retry_at, _ in progress)
+
+
+@pytest.mark.parametrize("headers,message,expected", [
+    ({"retry-after": "90"}, "", 90),
+    ({}, "Please try again in 2m3.5s. Visit the account dashboard.", 123.5),
+    ({"retry-after": "nan"}, "Please try again in 1h 2m3s.", 3723),
+])
+def test_rate_limit_wait_parsing_never_shortens_the_provider_reset(headers, message, expected):
+    response = httpx.Response(429, headers=headers, json={"error": {"message": message}})
+    assert rate_limit_delay(response, 0) == expected
+
+
+def test_transcript_clear_during_a_quota_wait_prevents_the_retry(sample_config):
+    requests, deleted = [], []
+    class Stop:
+        def is_set(self): return False
+        def wait(self, delay): deleted.append(True)
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(429, headers={"retry-after": "3"})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"), stopped=Stop(),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    generator.source_valid = lambda: not deleted
+    with pytest.raises(RecapError, match="transcript changed"):
+        generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Do not resend deleted speech."}], "en")
+    assert len(requests) == 1
+
+
+def test_successful_response_budget_paces_the_next_batch_instead_of_hitting_quota(sample_config):
+    delays = []
+    class Stop:
+        def is_set(self): return False
+        def wait(self, seconds): delays.append(seconds)
+    def handler(request):
+        return httpx.Response(200, headers={"x-ratelimit-limit-tokens": "8000",
+            "x-ratelimit-remaining-tokens": "20", "x-ratelimit-reset-tokens": "1m2s"},
+            json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(referenced_result())}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"), stopped=Stop(),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    turns = [{"id": "one", "speaker_name": "A", "original_text": "Tomorrow at six, not five."}]
+    assert generator.generate(turns, "en") == result()
+    assert generator.generate(turns, "en") == result()
+    assert len(delays) == 1 and 61 <= delays[0] <= 64
+
+
+def test_truncated_recap_gets_one_larger_completion_budget_then_validates_sources(sample_config):
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"finish_reason": "length" if len(requests) == 1 else "stop",
+            "message": {"content": json.dumps(referenced_result())}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    assert generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Tomorrow at six, not five."}], "hi") == result()
+    assert len(requests) == 2 and requests[1]["max_completion_tokens"] > requests[0]["max_completion_tokens"]
+
+
 def test_personal_moments_are_idempotent_private_and_removed_with_their_source():
     init_db()
     host = register_user("moment_host", "moment_host@example.com", "pass123")
@@ -221,6 +301,74 @@ def test_personal_moments_are_idempotent_private_and_removed_with_their_source()
     assert list_moments(host["id"]) == []
     clear_room_transcripts(room["id"])
     assert list_moments(guest["id"]) == []
+
+
+def test_quota_wait_is_visible_deduplicated_and_automatically_completes(sample_config):
+    init_db()
+    host = register_user("quota_wait", "quota_wait@example.com", "pass123")
+    room = create_room("Automatic recap wait", host["id"])
+    add_transcript(room["id"], host["id"], "Host", "Tomorrow at six, not five.", "en", {})
+    service = RecapService(replace(sample_config, groq_api_key="test-key"))
+    entered, release = threading.Event(), threading.Event()
+    requests = []
+    class Stop:
+        def is_set(self): return service.stopped.is_set()
+        def wait(self, delay):
+            entered.set()
+            assert release.wait(3)
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(429, headers={"retry-after": "3"})
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps(referenced_result())}}]})
+    service.generator.stopped = Stop()
+    service.generator.client_factory = lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        job = service.start(room["id"], "en")
+        assert entered.wait(3)
+        waiting = service.start(room["id"], "en")
+        assert waiting["job_id"] == job["job_id"] and waiting["status"] == "generating"
+        assert waiting["retry_at"] and "automatically" in waiting["error"]
+        assert len(requests) == 1
+        release.set()
+        service.pool.submit(lambda: None).result(3)
+        ready = service.status(room["id"], "en")
+        assert ready["status"] == "ready" and ready["retry_at"] is None and ready["error"] is None
+        assert service.start(room["id"], "en")["job_id"] == job["job_id"]
+        assert len(requests) == 2
+    finally:
+        release.set()
+        service.close()
+
+
+def test_daily_quota_cooldown_survives_restart_and_cannot_be_hammered_by_retry(sample_config):
+    import time
+    from unittest.mock import Mock
+
+    init_db()
+    host = register_user("daily_quota", "daily_quota@example.com", "pass123")
+    room = create_room("Daily allowance", host["id"])
+    add_transcript(room["id"], host["id"], "Host", "Tomorrow at six, not five.", "en", {})
+    config = replace(sample_config, groq_api_key="test-key")
+    service = RecapService(config)
+    service.generator.client_factory = lambda **kwargs: httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(429, headers={"retry-after": "86400"})))
+    try:
+        job = service.start(room["id"], "en")
+        service.pool.submit(lambda: None).result(3)
+        failed = service.status(room["id"], "en")
+        assert failed["status"] == "failed" and failed["retry_at"] > time.time() + 86000
+    finally:
+        service.close()
+    restarted = RecapService(config)
+    restarted.generator.generate = Mock()
+    try:
+        assert restarted.start(room["id"], "en")["job_id"] == job["job_id"]
+        restarted.pool.submit(lambda: None).result(3)
+        restarted.generator.generate.assert_not_called()
+    finally:
+        restarted.close()
 
 
 def test_recaps_deduplicate_requests_and_cannot_restore_cleared_transcript(sample_config):

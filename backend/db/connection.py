@@ -251,6 +251,14 @@ def init_db() -> None:
             if "gender" not in cols:
                 db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) DEFAULT 'female'")
 
+        # Preserve quota cooldowns across refresh/redeploy without replacing jobs.
+        if pg:
+            db.execute("ALTER TABLE conversation_recaps ADD COLUMN IF NOT EXISTS retry_at DOUBLE PRECISION")
+        else:
+            cols = [row["name"] for row in db.fetchall("PRAGMA table_info(conversation_recaps)")]
+            if "retry_at" not in cols:
+                db.execute("ALTER TABLE conversation_recaps ADD COLUMN retry_at REAL")
+
         if pg:
             db.raw_conn.autocommit = False
 

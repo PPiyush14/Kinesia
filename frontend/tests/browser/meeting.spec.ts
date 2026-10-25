@@ -424,6 +424,55 @@ test('recap failure stays honest and can be retried without inventing notes', as
   expect(connection.errors).toEqual([]);
 });
 
+test('recap quota waits resume automatically and recover from a temporary polling failure', async ({ page }) => {
+  const ended = { ...room, is_active: false, status: 'ended' };
+  const connection = await meeting(page, 'history', [ended]);
+  let posts = 0, polls = 0;
+  const point = { text: 'A recap generated automatically after waiting.', evidence: 'Tomorrow at six.', source_ids: ['quota-source'] };
+  await page.route(/\/api\/v1\/rooms\/[^/]+\/recap(?:\?|$)/, async (route) => {
+    if (route.request().method() === 'POST') {
+      posts++;
+      await route.fulfill({ json: { data: { status: 'queued' } } });
+    } else if (!posts) await route.fulfill({ json: { data: { status: 'not_generated', configured: true, language: 'hi' } } });
+    else {
+      polls++;
+      if (polls === 2) await route.fulfill({ status: 503, json: { error: 'Temporary connection problem.' } });
+      else await route.fulfill({ json: { data: polls === 1
+        ? { status: 'generating', configured: true, language: 'hi', retry_at: Date.now() / 1000 + 60, error: 'Waiting for provider quota.' }
+        : { status: 'ready', configured: true, language: 'hi', result: { summary: point, highlights: [], follow_ups: [], open_questions: [] } } } });
+    }
+  });
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await page.getByRole('button', { name: 'Generate AI recap' }).click();
+  await expect(page.getByRole('button', { name: 'Waiting for recap service', exact: true })).toBeDisabled();
+  await expect(page.getByRole('status')).toContainText('resume automatically');
+  await expect(page.getByRole('alert')).toContainText('Temporary connection problem.');
+  await expect(page.getByText(point.text, { exact: true })).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(posts).toBe(1);
+  expect(connection.errors).toEqual([]);
+});
+
+test('a persisted recap cooldown prevents retry spam and enables retry after the reset', async ({ page }) => {
+  await page.clock.install();
+  const ended = { ...room, is_active: false, status: 'ended' };
+  const connection = await meeting(page, 'history', [ended]);
+  let posts = 0;
+  const retryAt = Date.now() / 1000 + 60;
+  await page.route(/\/api\/v1\/rooms\/[^/]+\/recap(?:\?|$)/, async (route) => {
+    if (route.request().method() === 'POST') posts++;
+    await route.fulfill({ json: { data: { configured: true, language: 'hi', status: 'failed',
+      error: 'The recap quota will reset later.', retry_at: retryAt } } });
+  });
+  await page.getByRole('heading', { name: room.title, exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Waiting for quota reset', exact: true })).toBeDisabled();
+  await expect(page.getByRole('alert')).toContainText('Retry available at');
+  expect(posts).toBe(0);
+  await page.clock.fastForward(61000);
+  await expect(page.getByRole('button', { name: 'Retry recap', exact: true })).toBeEnabled();
+  expect(connection.errors).toEqual([]);
+});
+
 test('the new home opens an ended conversation as a review rather than a live call', async ({ page }) => {
   const ended = { ...room, is_active: false, status: 'ended' };
   const connection = await meeting(page, 'welcome', [ended]);

@@ -312,18 +312,20 @@ def test_speaking_stop_is_not_lost_when_it_follows_start_immediately(realtime_cl
     client = realtime_client
     token, headers = user(client, "short_speech_activity")
     code = client.post("/api/v1/rooms", headers=headers, json={"title": "Short acknowledgement"}).json()["data"]["room_code"]
-    with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+    coordinator = client.app.state.dashboard.coordinator
+    with patch.object(coordinator, "broadcast_event", wraps=coordinator.broadcast_event) as broadcast, \
+         client.websocket_connect(f"/ws/rooms/{code}") as socket:
         authenticate(socket, token)
         socket.send_json({"type": "speaking", "active": True})
         socket.send_json({"type": "speaking", "active": False})
         socket.send_json({"type": "ping", "data": "activity-complete"})
-        activity = []
         while True:
             event = socket.receive_json()
-            if event["type"] == "speaking":
-                activity.append(event["data"]["is_speaking"])
             if event["type"] == "pong":
                 break
+        # Pong acknowledges control processing. The separate event bridge may
+        # deliver broadcasts later, so assert production of both transitions.
+        activity = [call.args[2]["is_speaking"] for call in broadcast.call_args_list if call.args[1] == "speaking"]
         assert activity == [True, False]
 
 

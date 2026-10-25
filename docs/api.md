@@ -16,6 +16,10 @@ client in `frontend/src/services/api.ts` for request/response types.
   `output_language`; POST accepts `{ "language": "en" }`. Generation requires
   an ended, recorded room and membership. Pending, ready, and failed states are
   explicit; generated citations resolve to real transcript passages.
+  Optional `retry_at` is a Unix timestamp in seconds: an active job resumes
+  automatically at that time; a failed job with a future timestamp is in a
+  provider cooldown. Its `error` describes the wait/failure. Repeated POSTs
+  reuse active/cached jobs and preserve unexpired cooldowns.
 - `GET /api/v1/moments` and `GET/POST /api/v1/rooms/{code}/moments`: private
   bookmarks; POST accepts `{ "turn_id": "..." }`. DELETE the turn-ID suffix to
   remove the caller's bookmark.

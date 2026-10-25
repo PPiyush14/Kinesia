@@ -74,6 +74,7 @@ export interface RecapPoint {
 }
 
 export interface ConversationRecap {
+  retry_at?: number | null;
   status: 'not_generated' | 'queued' | 'generating' | 'ready' | 'failed';
   configured: boolean;
   available?: boolean;

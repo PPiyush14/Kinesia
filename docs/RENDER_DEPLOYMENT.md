@@ -140,7 +140,14 @@ The current limit is 48 batches of roughly 5,500 UTF-8 bytes, with a generation
 deadline and explicit errors. Free-tier rate limits may delay or reject requests.
 Groq selects references to original passages; the backend attaches the actual
 transcript turn IDs and exact quotes. Unknown references are rejected, with one
-automatic repair attempt. Semantic accuracy still requires review. Saved-moment
+automatic repair attempt, including recovery from a cut-short completion.
+Requests are paced from Groq token/reset headers. Temporary quota waits keep
+the job active and show an automatic resume time. When the reset exceeds the
+generation deadline, a persisted cooldown shows when retry becomes available;
+repeated clicks cannot start duplicate work. Transient status polling recovers
+automatically. Free-tier daily exhaustion still requires waiting for the provider.
+Startup adds nullable `conversation_recaps.retry_at` without replacing data.
+Semantic accuracy still requires review. Saved-moment
 lists return up to 500 entries.
 
 The legacy insights endpoint retains extractive notes for API compatibility.

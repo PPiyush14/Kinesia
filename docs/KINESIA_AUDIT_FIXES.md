@@ -1,5 +1,63 @@
 # Kinesia pipeline audit and fixes
 
+## Recap quota recovery: 2026-10-25
+
+The reported screenshot showed a Groq 429 failure. A small live configuration
+probe confirmed the configured model currently has an 8,000-token-per-minute
+allowance. The backend retried only three times and capped `retry-after` at
+60 seconds, even if the provider required longer. It did not pace consecutive
+map/reduce jobs from the token-budget headers. Cut-short outputs also failed
+immediately rather than using the bounded repair path. These behaviors were
+reproduced with deterministic HTTP transport regressions before fixing them.
+
+- Honor provider wait durations and HTTP dates without shortening them. Support
+  reset durations in rate headers/error metadata; never expose raw provider
+  messages or credentials. Rate retries have a separate bounded budget from
+  output repair and transient transport retries, within the existing ten-minute
+  generation deadline.
+- Pace consecutive calls from remaining-token/reset headers using a conservative
+  request-size estimate. The provider remains authoritative if its accounting
+  differs; a 429 retains the job and waits automatically when time permits.
+- Persist the next retry timestamp in one additive nullable `retry_at` column.
+  Active waits show a resume time and continue automatically; longer cooldowns
+  show when retry becomes available and block retry spam across refresh/restart.
+  Existing ready results remain cached and requests for the same source/language
+  remain deduplicated. Old failed jobs can be retried after deployment.
+- Increase the initial completion allowance to 2,400 tokens and permit one
+  source-validated repair, including a 3,200-token allowance for a length cutoff.
+  Reduction calls merge already verified cited notes instead of resending every
+  raw source excerpt, reducing token pressure. Every map still processes its
+  source input; the backend still attaches exact original quotes and real IDs.
+- Keep polling after transient status-request failures and clear recovered errors.
+  Avoid expiring queued jobs using the shorter active-generation timeout.
+  Transcript deletion/replacement and server shutdown are checked before and
+  after waits; cleared speech is never resent on a retry.
+
+Verification: **159 backend tests passed** (59.62 seconds, one existing upstream
+Starlette/httpx warning), including **28 recap/floor unit cases**; **20 frontend
+unit tests and all 21 browser scenarios** passed. The five focused recap browser scenarios passed, including
+automatic quota recovery, interrupted polling, and persisted cooldown controls.
+Strict TypeScript, production build, and full configured Ruff checks passed.
+An existing speaking-state test incorrectly treated pong as a barrier for the
+separate room-event bridge; it now checks that both state transitions were
+broadcast before the acknowledged control processing completes. No live speech
+behavior was changed in this recap fix.
+
+Live synthetic Hindi-to-Hindi (8 turns, 1,266 ms) and Hindi-to-English (24 turns,
+4,156 ms) recaps succeeded with validated source quotes. These particular live
+calls did not encounter a 429; quota recovery/waits were verified with controlled
+provider responses and persisted-job tests. Synthetic repetitions are not a
+real-conversation quality benchmark. No production conversation/database was
+read or modified. The opt-in probe supports bounded repeated input for testing.
+
+The provider's free allowance remains a real limit: daily exhaustion cannot be
+fixed by immediate retries. Generation may wait, and requests exceeding the
+generation window receive an explicit cooldown rather than a fabricated recap.
+See [Groq rate limits](https://console.groq.com/docs/rate-limits). The fix needs
+no new key or environment setting. Deploy the latest `main` manually, refresh
+the browser, and retry the old failed conversation. Startup applies the additive
+column migration while preserving existing transcripts and recaps.
+
 ## Latency follow-up: 2026-10-25
 
 Two additional changes reduce avoidable waiting without changing the working
