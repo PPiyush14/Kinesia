@@ -1,11 +1,11 @@
-/* Audio capture stays off the UI thread. One 100ms PCM16 frame per message. */
+/* Audio capture stays off the UI thread. One 40ms PCM16 frame per message. */
 class KinesiaCapture extends AudioWorkletProcessor {
   constructor() {
     super();
     this.phase = 0;
     this.sum = 0;
     this.count = 0;
-    this.samples = new Int16Array(1600);
+    this.samples = new Int16Array(640);
     this.index = 0;
     this.voiced = 0;
     this.quiet = 0;
@@ -31,7 +31,7 @@ class KinesiaCapture extends AudioWorkletProcessor {
         if (this.index === this.samples.length) {
           const pcm = this.samples.buffer;
           this.port.postMessage({ type: 'pcm', data: pcm }, [pcm]);
-          this.samples = new Int16Array(1600);
+          this.samples = new Int16Array(640);
           this.index = 0;
         }
       }

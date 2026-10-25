@@ -1,5 +1,45 @@
 # Kinesia pipeline audit and fixes
 
+## Latency follow-up: 2026-10-25
+
+Two additional changes reduce avoidable waiting without changing the working
+Soniox model/recognition settings, Cartesia voice/speed, or public protocol:
+
+- **Stable clause timer starvation:** the 350-ms deadline previously ran only
+  inside a receive-timeout handler. Continuous caption packets could postpone
+  speech indefinitely despite sufficient finalized translation. The deadline
+  is now checked on every receive-loop iteration. A deterministic regression
+  reproduced first speech delayed until 1.02/1.10 seconds under continuous
+  packets; it now arrives within the configured wait plus a packet interval.
+  Provisional hypotheses stay caption-only, and concatenated voiced clauses
+  still match the complete final translation, including negation.
+- **Microphone batching:** changed the AudioWorklet from 100-ms to 40-ms PCM
+  frames. This reduces the batching ceiling by 60 ms (about 30 ms average for
+  uniformly arriving samples), not the entire recognition/translation latency.
+  Audio format and sample rate remain unchanged. Upload buffering now counts
+  bytes to preserve the two-second startup allowance for both 40/100-ms frames.
+  Packet count rises from 10 to 25 per second; PCM payload bandwidth is unchanged.
+
+The opt-in synthetic provider probe defaults to the browser's new 40-ms frames
+and accepts `--frame-ms 100` for comparisons. A live English-to-Hindi run passed:
+40 caption updates, one final segment, three stable phrases, no provider errors,
+and voiced text matching the complete final translation. Stable phrase to first
+PCM was 78/109/125 ms. These measurements exclude browser/Render transport and
+do not prove an end-to-end improvement of that amount. No production data or
+database was accessed.
+
+Verification: **150 backend tests passed** (65.88 seconds, one existing upstream
+Starlette/httpx warning), **20 frontend unit tests**, **19 browser scenarios**,
+full configured Ruff checks, strict TypeScript and production build. The served
+`backend/web/audio-worklet.js` is rebuilt from the tested source. No environment
+update is required; manually deploy this follow-up commit and refresh both
+browsers before comparing short/long turns, overlap, mute, and reconnect.
+
+More aggressive finalization was deliberately left unchanged: Soniox documents
+that earlier endpointing can slightly reduce recognition accuracy. See
+[Soniox endpoint controls](https://soniox.com/docs/stt/rt/endpoint-detection).
+The working checkpoint and the preceding audit commit remain available.
+
 ## Final end-to-end audit: 2026-10-25
 
 This pass inspected the actual browser-to-provider pipeline, authenticated

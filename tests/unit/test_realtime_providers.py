@@ -4,12 +4,13 @@ import asyncio
 import base64
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from backend.nlp.extractive_summary import ExtractiveSummarizer
-from backend.realtime_providers import CartesiaStream, TranscriptBuffer
+from backend.realtime_providers import CartesiaStream, SonioxStream, TranscriptBuffer
 
 
 def token(text, *, final=True, translation=False, language="en", start=0, end=500):
@@ -105,6 +106,48 @@ class Socket:
     async def send(self, value): self.sent.append(json.loads(value))
     async def recv(self): return json.dumps(next(self.responses))
     async def close(self): self.closed = True
+
+
+@pytest.mark.parametrize("frame_ms", [40, 100])
+def test_soniox_upload_budget_preserves_two_seconds_independent_of_frame_size(sample_config, frame_ms):
+    errors = []
+    stream = SonioxStream(sample_config, "en", "hi", 0, lambda _: None, lambda *_: None, None, errors.append)
+    for _ in range(2000 // frame_ms):
+        stream.feed(b"\0" * (32 * frame_ms))
+    assert not errors and not stream.closed
+    assert stream.queued_audio_bytes == 64000
+    stream.feed(b"\0" * (32 * frame_ms))
+    assert len(errors) == 1 and stream.closed
+
+
+@pytest.mark.parametrize("packet_interval", [0.01, 0.05])
+def test_stable_clause_deadline_is_not_starved_by_continuous_caption_packets(sample_config, packet_interval):
+    async def run():
+        clock = [0.0]
+        text = "Tomorrow I will bring tea but definitely not coffee"
+        responses = [{"tokens": [token(text), token(text, translation=True)]}]
+        responses += [{"tokens": [token(" another provisional word", final=False)]}] * round(1 / packet_interval)
+        responses += [{"finished": True}]
+        class CaptionSocket(Socket):
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+            async def recv(self):
+                clock[0] += packet_interval
+                return await super().recv()
+        socket = CaptionSocket(responses)
+        phrases, finals, errors = [], [], []
+        async def final(segment): finals.append(segment)
+        def phrase(value, _identifier): phrases.append((clock[0], value))
+        config = replace(sample_config, speech_clause_wait_ms=350)
+        stream = SonioxStream(config, "en", "hi", 0, lambda _: None, phrase, final, errors.append)
+        with patch("backend.realtime_providers.connect", return_value=socket), \
+             patch("backend.realtime_providers.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            await stream.run()
+        assert not errors
+        assert phrases[0][0] <= packet_interval + 0.35 + packet_interval + 0.001
+        assert " ".join(value for _, value in phrases) == text
+        assert len(finals) == 1 and finals[0].translated == text
+    asyncio.run(run())
 
 
 def test_cartesia_continuations_flush_clauses_without_closing_voice_context(sample_config):

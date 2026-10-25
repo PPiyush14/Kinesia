@@ -117,8 +117,11 @@ language changes. These are guardrails, not capacity guarantees.
 Soniox opens a stream per speaker/target language, shared among listeners.
 Provider concurrency limits and credits can lower practical capacity.
 
-Microphone PCM travels in 100-ms frames. Stable word-safe clauses can be released
-after a 350-ms wait when enough finalized text exists; Cartesia continues the
+Microphone PCM travels in 40-ms frames, reducing the capture batching ceiling
+by 60 ms compared with the previous 100-ms frames. The upload buffer remains
+bounded to two seconds of PCM regardless of packet size. Stable word-safe
+clauses can be released after a 350-ms wait when enough finalized text exists;
+that deadline is enforced even during continuous caption updates. Cartesia continues the
 same speech context across clauses in an utterance. Partial STT is never voiced.
 Translation still needs linguistic context. Bounded queues visibly skip stale
 audio during overload. No fixed accuracy or sub-second end-to-end latency is

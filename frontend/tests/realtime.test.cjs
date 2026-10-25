@@ -463,7 +463,7 @@ test('PCM decoding uses the shared binary header and preserves little-endian aud
   assert.equal(module.exports.decodeAudioPacket(new ArrayBuffer(10)), null);
 });
 
-test('AudioWorklet emits exactly one second of 16k PCM from 44.1k and 48k audio', () => {
+test('AudioWorklet delivers 40ms frames without losing or duplicating 44.1k and 48k input samples', () => {
   for (const rate of [44100, 48000]) {
     const messages = [];
     let Processor;
@@ -473,7 +473,8 @@ test('AudioWorklet emits exactly one second of 16k PCM from 44.1k and 48k audio'
     const processor = new Processor();
     for (let offset = 0; offset < rate; offset += 128) processor.process([[new Float32Array(Math.min(128, rate - offset)).fill(0.1)]]);
     const frames = messages.filter((message) => message.type === 'pcm');
-    assert.equal(frames.length, 10);
+    assert.equal(frames.length, 25);
+    assert.ok(frames.every((frame) => frame.data.byteLength === 1280));
     assert.equal(frames.reduce((sum, message) => sum + message.data.byteLength / 2, 0), 16000);
     assert.equal(new DataView(frames[0].data).getInt16(0, true), Math.floor(0.1 * 32767));
   }

@@ -14,7 +14,7 @@ from backend.config import _is_missing, load_config
 from backend.realtime_providers import CartesiaStream, SonioxStream
 
 
-async def check(target, streaming=False):
+async def check(target, streaming=False, frame_ms=40):
     config = load_config()
     if _is_missing(config.soniox_api_key) or _is_missing(config.cartesia_api_key):
         print(json.dumps({"ok": False, "error": "Configure the two backend API keys first."}))
@@ -69,12 +69,14 @@ async def check(target, streaming=False):
             stream.on_boundary = lambda identifier: phrases.put_nowait((None, identifier, time.monotonic()))
             worker = asyncio.create_task(speak())
         stream.start()
-        for offset in range(0, len(audio), 3200):
-            stream.feed(audio[offset:offset + 3200])
-            await asyncio.sleep(0.1)
+        frame_bytes = frame_ms * 32
+        for offset in range(0, len(audio), frame_bytes):
+            stream.feed(audio[offset:offset + frame_bytes])
+            await asyncio.sleep(frame_ms / 1000)
         await stream.flush()
         await stream.close()
         print(json.dumps({"provider": "soniox", "ok": bool(segments) and not errors,
+                          "input_frame_ms": frame_ms,
                           "caption_updates": len(captions), "final_segments": len(segments),
                           "translated_segments": sum(bool(segment.translated) for segment in segments),
                           "errors": errors}, ensure_ascii=False), flush=True)
@@ -121,7 +123,8 @@ if __name__ == "__main__":
     parser.add_argument("--live", action="store_true", help="Use a few seconds of provider credits.")
     parser.add_argument("--language", default="hi")
     parser.add_argument("--streaming", action="store_true", help="Exercise stable clauses, continuations, self-corrections and an intentional hmm.")
+    parser.add_argument("--frame-ms", type=int, choices=(40, 100), default=40, help="Synthetic microphone packet duration; defaults to the browser's 40 ms.")
     arguments = parser.parse_args()
     if not arguments.live:
         parser.error("Pass --live to authorize the synthetic provider calls.")
-    raise SystemExit(asyncio.run(check(arguments.language, arguments.streaming)))
+    raise SystemExit(asyncio.run(check(arguments.language, arguments.streaming, arguments.frame_ms)))

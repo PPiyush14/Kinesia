@@ -215,7 +215,8 @@ class SonioxStream:
         self.config, self.source_lang, self.target_lang = config, source_lang, target_lang
         self.buffer = TranscriptBuffer(source_lang, target_lang, offset_ms)
         self.on_caption, self.on_phrase, self.on_final, self.on_error = on_caption, on_phrase, on_final, on_error
-        self.audio = asyncio.Queue(maxsize=20)  # At most two seconds of unsent 100-ms audio.
+        self.audio = asyncio.Queue(maxsize=50)
+        self.queued_audio_bytes = 0  # Two seconds of PCM, independent of frame size.
         self.socket = None
         self.task = None
         self.closed = False
@@ -228,7 +229,10 @@ class SonioxStream:
         if self.closed:
             return
         try:
+            if self.queued_audio_bytes + len(audio) > 64000:
+                raise asyncio.QueueFull
             self.audio.put_nowait(audio)
+            self.queued_audio_bytes += len(audio)
         except asyncio.QueueFull:
             # Replaying stale microphone audio later is worse than reconnecting.
             self.on_error("Soniox audio upload fell behind. Reconnect to resume live speech.")
@@ -286,11 +290,19 @@ class SonioxStream:
                         if chunk is None:
                             await socket.send("")
                             return
+                        self.queued_audio_bytes -= len(chunk)
                         await socket.send(chunk)
                 sender = asyncio.create_task(send_audio())
                 while not self.closed:
                     if sender.done() and sender.exception():
                         raise sender.exception()
+                    # Caption packets may arrive continuously. Enforce the
+                    # clause deadline even when recv() never times out.
+                    if phrase_due is not None and time.monotonic() >= phrase_due:
+                        phrase = self.buffer.phrase(allow_fragment=True)
+                        if phrase:
+                            self.on_phrase(phrase, self.buffer.turn_id)
+                        phrase_due = None
                     deadlines = [due for due in (finish_due, phrase_due) if due is not None]
                     timeout = max(0.01, min(deadlines) - time.monotonic()) if deadlines else 1.0
                     try:
@@ -299,11 +311,6 @@ class SonioxStream:
                         if finish_due and time.monotonic() >= finish_due:
                             await self._finish()
                             finish_due = None
-                            phrase_due = None
-                        elif phrase_due and time.monotonic() >= phrase_due:
-                            phrase = self.buffer.phrase(allow_fragment=True)
-                            if phrase:
-                                self.on_phrase(phrase, self.buffer.turn_id)
                             phrase_due = None
                         continue
                     if response.get("error_code") is not None or response.get("error_type"):
