@@ -93,6 +93,46 @@ def test_websocket_requires_authenticated_first_message(realtime_client):
         assert error.value.code == 4401
 
 
+@pytest.mark.parametrize("method,path,body", [
+    ("POST", "/api/v1/auth/login", "[]"),
+    ("POST", "/api/v1/auth/register", '{"username": ["wrong"], "email":"a@b.co", "password":"pass123"}'),
+    ("PATCH", "/api/v1/auth/profile", "{broken"),
+    ("PATCH", "/api/v1/auth/profile", "[]"),
+    ("PATCH", "/api/v1/auth/profile", '{"display_name": 123}'),
+    ("POST", "/api/v1/rooms", '{"title":"Private", "record_session":"false"}'),
+])
+def test_invalid_request_bodies_return_client_errors_and_leave_the_service_healthy(realtime_client, method, path, body):
+    _, headers = user(realtime_client, "invalid_request_user")
+    response = realtime_client.request(method, path, content=body, headers=dict(headers, **{"Content-Type": "application/json"}))
+    assert response.status_code == 400
+    assert realtime_client.get("/api/v1/health").status_code == 200
+
+
+def test_passcode_verification_does_not_show_a_disconnected_guest_as_present(realtime_client):
+    client = realtime_client
+    _, headers = user(client, "presence_host")
+    _, guest = user(client, "presence_guest")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Private", "passcode": "pass123"}).json()["data"]["room_code"]
+    assert client.post(f"/api/v1/rooms/{code}/verify", headers=guest, json={"passcode": "pass123"}).json()["data"]["valid"]
+    assert client.get(f"/api/v1/rooms/{code}/participants", headers=headers).json()["data"] == []
+
+
+def test_room_payload_validation_rejects_bad_fields_before_provider_work(realtime_client):
+    client = realtime_client
+    _, headers = user(client, "room_fields")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Input validation", "passcode": "private-code"}).json()["data"]["room_code"]
+    for endpoint, body in (
+        ("verify", {"passcode": {"wrong": True}}),
+        ("speak", {"text": [], "source_lang": "en"}),
+        ("speak", {"text": "hello", "source_lang": "en", "confidence": []}),
+        ("speak", {"text": "hello", "source_lang": "unsupported"}),
+        ("languages", {"speaking_lang": []}),
+        ("languages", {"is_muted": "false"}),
+    ):
+        response = client.post(f"/api/v1/rooms/{code}/{endpoint}", headers=headers, json=body)
+        assert response.status_code == 400, (endpoint, response.status_code)
+
+
 def test_private_room_cannot_be_joined_without_passcode_grant(realtime_client):
     client = realtime_client
     _, headers = user(client, "private_host")
@@ -146,6 +186,57 @@ def test_odd_sized_microphone_frame_is_rejected(realtime_client):
         assert "PCM16" in receive_event(socket, "pipeline_error")["message"]
 
 
+def test_microphone_mute_does_not_reset_incoming_audio(realtime_client):
+    client = realtime_client
+    token, headers = user(client, "mute_preserves_listening")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Keep listening"}).json()["data"]["room_code"]
+    with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+        authenticate(socket, token)
+        socket.send_json({"type": "configure", "is_muted": True})
+        socket.send_json({"type": "ping", "data": "configured"})
+        messages = []
+        while True:
+            message = socket.receive_json()
+            messages.append(message["type"])
+            if message["type"] == "pong":
+                break
+        assert "audio_reset" not in messages
+
+
+def test_mute_flushes_pending_words_to_transcript_and_peer_audio(realtime_client):
+    import threading
+
+    flushed, spoken = threading.Event(), threading.Event()
+    class PendingSoniox(FakeSoniox):
+        def feed(self, data): self.once = True
+        async def flush(self):
+            if not self.once or self.closed:
+                return
+            self.phrase("The final words.", "pending-turn")
+            self.on_boundary("pending-turn")
+            await self.final(SpeechSegment("pending-turn", "The final words.", "The final words.",
+                                           "en", self.target, self.offset, self.offset + 500, 0.95))
+            self.closed = True
+            flushed.set()
+    class ObservedCartesia(FakeCartesia):
+        async def synthesize(self, *args, **kwargs):
+            await super().synthesize(*args, **kwargs)
+            spoken.set()
+    client = realtime_client
+    host, headers = user(client, "pending_words_host")
+    guest, _ = user(client, "pending_words_guest")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Pending words"}).json()["data"]["room_code"]
+    with patch("backend.realtime_rooms.SonioxStream", PendingSoniox), patch("backend.realtime_rooms.CartesiaStream", ObservedCartesia), client.websocket_connect(f"/ws/rooms/{code}") as speaker, client.websocket_connect(f"/ws/rooms/{code}") as listener:
+        authenticate(speaker, host)
+        authenticate(listener, guest, "en")
+        speaker.send_bytes(b"\0\0" * 1600)
+        speaker.send_json({"type": "configure", "is_muted": True})
+        assert flushed.wait(2), "Mute discarded the unfinalized STT stream"
+        assert spoken.wait(2), "Mute discarded the final translated speech"
+        history = client.get(f"/api/v1/rooms/{code}/transcripts", headers=headers).json()["data"]
+        assert history[-1]["original_text"] == "The final words."
+
+
 def test_new_subscription_survives_old_socket_cleanup(realtime_client):
     client = realtime_client
     token, headers = user(client, "reconnecting")
@@ -159,6 +250,81 @@ def test_new_subscription_survives_old_socket_cleanup(realtime_client):
             assert participants[0]["listening_lang"] == "hi"
             current.send_json({"type": "ping", "data": "still-here"})
             assert receive_event(current, "pong") == "still-here"
+
+
+def test_simultaneous_joins_cannot_exceed_the_room_participant_limit(realtime_client):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import ExitStack
+
+    client = realtime_client
+    accounts = [user(client, f"capacity_{index}") for index in range(9)]
+    code = client.post("/api/v1/rooms", headers=accounts[0][1], json={"title": "Capacity"}).json()["data"]["room_code"]
+    coordinator = client.app.state.dashboard.coordinator
+    original_join = coordinator.join_room
+    barrier, finished, release = threading.Barrier(2), threading.Event(), threading.Event()
+    outcomes, guard = [], threading.Lock()
+    def delayed_join(room_code, profile, *args):
+        if profile["username"] in {"capacity_7", "capacity_8"}:
+            try:
+                barrier.wait(0.3)
+            except threading.BrokenBarrierError:
+                pass
+        return original_join(room_code, profile, *args)
+    def join(token):
+        with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+            socket.send_json({"type": "authenticate", "token": token, "speaking_lang": "en", "listening_lang": "hi"})
+            while True:
+                event = socket.receive_json()
+                if event["type"] in {"connected", "pipeline_error"}:
+                    with guard:
+                        outcomes.append(event["type"])
+                        if len(outcomes) == 2:
+                            finished.set()
+                    break
+            release.wait(5)
+    with ExitStack() as stack, ThreadPoolExecutor(max_workers=2) as pool:
+        for token, _ in accounts[:7]:
+            authenticate(stack.enter_context(client.websocket_connect(f"/ws/rooms/{code}")), token)
+        with patch.object(coordinator, "join_room", side_effect=delayed_join):
+            futures = [pool.submit(join, token) for token, _ in accounts[7:]]
+            try:
+                assert finished.wait(3)
+                assert outcomes.count("connected") == 1
+                assert outcomes.count("pipeline_error") == 1
+            finally:
+                release.set()
+                for future in futures:
+                    future.result(3)
+
+
+def test_websocket_control_array_is_a_client_error_not_a_reconnect_loop(realtime_client):
+    client = realtime_client
+    token, headers = user(client, "invalid_control")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Control validation"}).json()["data"]["room_code"]
+    with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+        authenticate(socket, token)
+        socket.send_json([])
+        assert "JSON object" in receive_event(socket, "pipeline_error")["message"]
+
+
+def test_speaking_stop_is_not_lost_when_it_follows_start_immediately(realtime_client):
+    client = realtime_client
+    token, headers = user(client, "short_speech_activity")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Short acknowledgement"}).json()["data"]["room_code"]
+    with client.websocket_connect(f"/ws/rooms/{code}") as socket:
+        authenticate(socket, token)
+        socket.send_json({"type": "speaking", "active": True})
+        socket.send_json({"type": "speaking", "active": False})
+        socket.send_json({"type": "ping", "data": "activity-complete"})
+        activity = []
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "speaking":
+                activity.append(event["data"]["is_speaking"])
+            if event["type"] == "pong":
+                break
+        assert activity == [True, False]
 
 
 def test_history_removal_does_not_delete_shared_rooms_and_account_route_still_works(realtime_client):
@@ -176,6 +342,30 @@ def test_history_removal_does_not_delete_shared_rooms_and_account_route_still_wo
     assert client.get("/api/v1/rooms", headers=headers).json()["data"] == []
     assert client.delete("/api/v1/auth/profile", headers=other_headers).status_code == 200
     assert client.get("/api/v1/auth/me", headers=other_headers).status_code == 401
+
+
+@pytest.mark.parametrize("record_session", [True, False])
+def test_ending_an_already_ended_room_is_safe_to_retry(realtime_client, record_session):
+    client = realtime_client
+    _, headers = user(client, "retry_end")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "End twice", "record_session": record_session}).json()["data"]["room_code"]
+    first = client.post(f"/api/v1/rooms/{code}/end", headers=headers, json={})
+    second = client.post(f"/api/v1/rooms/{code}/end", headers=headers, json={})
+    assert first.status_code == second.status_code == 200
+    assert second.json()["data"]["executive_summary"] == first.json()["data"]["executive_summary"]
+
+
+def test_account_deletion_revokes_live_guest_presence_in_other_peoples_rooms(realtime_client):
+    client = realtime_client
+    host, headers = user(client, "account_host")
+    guest, guest_headers = user(client, "account_guest")
+    code = client.post("/api/v1/rooms", headers=headers, json={"title": "Guest account"}).json()["data"]["room_code"]
+    with client.websocket_connect(f"/ws/rooms/{code}") as speaker, client.websocket_connect(f"/ws/rooms/{code}") as listener:
+        authenticate(speaker, host)
+        authenticate(listener, guest)
+        assert client.delete("/api/v1/auth/profile", headers=guest_headers).status_code == 200
+        participants = client.get(f"/api/v1/rooms/{code}/participants", headers=headers).json()["data"]
+        assert [entry["user_name"] for entry in participants] == ["account_host"]
 
 
 def test_repeated_disconnect_releases_sessions_and_membership(realtime_client):

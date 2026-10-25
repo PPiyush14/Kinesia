@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 import queue
 import threading
 import time
@@ -21,25 +22,41 @@ from typing import Any
 from backend.config import AppConfig, ChannelConfig
 from backend.db.rooms import (
     add_participant,
-    clear_room_transcripts,
-    is_room_member,
     add_transcript,
+    clear_room_transcripts,
     end_room,
     get_room_by_code,
     get_room_transcripts,
     get_session_insights,
+    is_room_member,
     remove_participant,
     save_session_insights,
     save_stream_transcript,
     update_participant_languages,
 )
 from backend.gemma_client import GemmaClient
+from backend.languages import LANGUAGE_DISPLAY_NAMES, normalize_language_code
 from backend.nlp.entity_extractor import EntityExtractor
-from backend.nlp.summarizer import ConversationSummarizer
 from backend.nlp.extractive_summary import ExtractiveSummarizer
+from backend.nlp.summarizer import ConversationSummarizer
 from backend.tts_client import TtsClient
 
 logger = logging.getLogger(__name__)
+
+
+def _room_language(value):
+    code = normalize_language_code(value) if isinstance(value, str) else None
+    if code not in LANGUAGE_DISPLAY_NAMES:
+        raise ValueError("Select a supported speaking/listening language.")
+    return code
+
+
+def _unsaved_conversation_notes(room_id, title):
+    return {
+        "room_id": room_id,
+        "executive_summary": f"Conversation '{title}' ended. Saving was disabled, so no transcript or conversation notes were stored.",
+        "action_items": [], "key_points": [], "entities": {}, "recording_enabled": False,
+    }
 
 
 @dataclass
@@ -68,6 +85,7 @@ class RoomSession:
     stream_turns: dict[str, dict[str, Any]] = field(default_factory=dict)
     host_id: str = ""
     speaker_audio_positions: dict[str, float] = field(default_factory=dict)
+    transcript_cutoffs: dict[str, float] = field(default_factory=dict)
 
 
 def _ordered_utterance(method):
@@ -115,7 +133,7 @@ class RoomCoordinator:
         self.summarizer = ExtractiveSummarizer() if config.translation_provider == "soniox" else ConversationSummarizer(self.gemma)
         try:
             self.entity_extractor = EntityExtractor()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
             logger.warning("EntityExtractor could not be loaded: %s", exc)
             self.entity_extractor = None
 
@@ -126,7 +144,7 @@ class RoomCoordinator:
         try:
             from backend.groq_whisper_client import GroqWhisperClient
             self.whisper_fallback = GroqWhisperClient(config) if config.translation_provider != "soniox" else None
-        except Exception:
+        except Exception:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
             self.whisper_fallback = None
 
     def get_or_load_room(self, room_code: str) -> RoomSession | None:
@@ -170,6 +188,7 @@ class RoomCoordinator:
         listening_lang: str = "hi",
     ) -> tuple[RoomSession, queue.Queue]:
         """Join a participant into a room session."""
+        speaking_lang, listening_lang = _room_language(speaking_lang), _room_language(listening_lang)
         room = self.get_or_load_room(room_code)
         if not room:
             raise ValueError(f"Room '{room_code}' does not exist or has ended.")
@@ -263,6 +282,12 @@ class RoomCoordinator:
         is_muted: bool | None = None,
     ) -> list[dict[str, Any]]:
         """Update participant dialect or mute state and notify room."""
+        if speaking_lang is not None:
+            speaking_lang = _room_language(speaking_lang)
+        if listening_lang is not None:
+            listening_lang = _room_language(listening_lang)
+        if is_muted is not None and not isinstance(is_muted, bool):
+            raise ValueError("Microphone mute must be true or false.")
         clean_code = room_code.strip().lower()
         with self._lock:
             room = self.active_rooms.get(clean_code)
@@ -378,6 +403,7 @@ class RoomCoordinator:
             try:
                 import io
                 import wave
+
                 import numpy as np
 
                 with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
@@ -391,18 +417,19 @@ class RoomCoordinator:
                         arr = np.frombuffer(frames, dtype=np.int16).reshape(-1, channels)
                         mono = arr.mean(axis=1).astype(np.int16)
                         return mono.tobytes(), sample_rate, 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
                 logger.debug("Failed parsing WAV via wave module: %s", exc)
 
         # 2. Try pydub/ffmpeg for webm/ogg/mp3 if available
         try:
             import io
+
             from pydub import AudioSegment
             seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
             seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
             return seg.raw_data, 16000, 1
-        except Exception:
-            pass
+        except Exception as cleanup_error:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
+            logger.debug("Provider cleanup/probe failed (%s)", type(cleanup_error).__name__)
 
         # Only explicitly raw audio may be treated as PCM. Compressed container
         # bytes mislabeled as PCM produce meaningless Soniox transcripts.
@@ -457,7 +484,7 @@ class RoomCoordinator:
                 confidence,
                 len(transcribed_text),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
             logger.error("Soniox STT transcription failed: %s", exc)
             if self.whisper_fallback:
                 try:
@@ -467,7 +494,7 @@ class RoomCoordinator:
                         filename="speech.wav",
                         mime_type=mime_type,
                     )
-                except Exception as whisper_exc:
+                except Exception as whisper_exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
                     logger.error("Fallback Groq Whisper also failed: %s", whisper_exc)
 
         if not transcribed_text:
@@ -506,6 +533,12 @@ class RoomCoordinator:
         if not room:
             raise ValueError(f"Active room '{clean_code}' not found.")
 
+        if not isinstance(text, str) or len(text) > 5000:
+            raise ValueError("Speech text must contain at most 5000 characters.")
+        source_lang = _room_language(source_lang)
+        if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+                or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+            raise ValueError("Confidence must be a number between zero and one.")
         clean_text = text.strip()
         if not clean_text:
             return {}
@@ -586,7 +619,7 @@ class RoomCoordinator:
                     else:
                         translated = self.gemma.translate(clean_text, speaker_ch, listener_ch, source_lang, target_lang, source_lang)
                     translations[target_lang] = translated.strip() if translated else ""
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
                     logger.warning("Translation to %s failed: %s", target_lang, exc)
                     translations[target_lang] = ""
 
@@ -608,7 +641,7 @@ class RoomCoordinator:
                     b64_audio = base64.b64encode(wav_bytes).decode("utf-8")
                     mime = "audio/mpeg" if wav_bytes[:3] == b"ID3" or wav_bytes[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") else "audio/wav"
                     audio_payloads[target_lang] = f"data:{mime};base64,{b64_audio}"
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
                 logger.debug("TTS synthesis failed for lang %s: %s", target_lang, exc)
 
         # Bound concurrent provider work; latency is no longer the sum of every
@@ -622,7 +655,7 @@ class RoomCoordinator:
         if self.entity_extractor:
             try:
                 entities = self.entity_extractor.extract(clean_text)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
                 logger.debug("Entity extraction failed: %s", exc)
 
         # Persist to database only if session recording is enabled
@@ -666,13 +699,15 @@ class RoomCoordinator:
 
         return turn_record
 
-    def record_stream_segment(self, room_code, speaker_id, speaker_name, segment):
+    def record_stream_segment(self, room_code, speaker_id, speaker_name, segment, *, primary=False):
         room = self.get_or_load_room(room_code)
         if not room:
             return
         with room.turn_lock:
             if room.ending:
                 return
+            if segment.start_ms < room.transcript_cutoffs.get(speaker_id, 0):
+                return  # A delayed final result must not recreate cleared speech.
             # Align results from parallel language streams by source-audio time,
             # never by repeated words. Repeated utterances remain distinct.
             match = None
@@ -693,15 +728,23 @@ class RoomCoordinator:
                          "speaker_name": speaker_name, "original_text": segment.original,
                          "source_lang": segment.source_lang, "confidence": segment.confidence,
                          "translations": {}, "timestamp": time.time(), "revision": 0,
-                         "_start": segment.start_ms, "_end": segment.end_ms, "_epoch": segment.audio_epoch}
+                         "_start": segment.start_ms, "_end": segment.end_ms, "_epoch": segment.audio_epoch,
+                         "_translated_languages": set()}
                 room.stream_turns[identifier] = match
                 if len(room.stream_turns) > 200:
                     del room.stream_turns[next(iter(room.stream_turns))]
-            if segment.target_lang in match["translations"] and match["translations"][segment.target_lang] == segment.translated:
+            source_changed = primary and (match["original_text"] != segment.original or match["source_lang"] != segment.source_lang)
+            if primary:
+                match.update(original_text=segment.original, source_lang=segment.source_lang, confidence=segment.confidence)
+            if not source_changed and segment.target_lang in match["translations"] and match["translations"][segment.target_lang] == segment.translated:
                 return
-            match["translations"][segment.source_lang] = segment.original
+            match["_start"] = min(match["_start"], segment.start_ms)
+            match["_end"] = max(match["_end"], segment.end_ms)
+            if match["source_lang"] not in match["_translated_languages"]:
+                match["translations"][match["source_lang"]] = match["original_text"]
             if segment.translated:
                 match["translations"][segment.target_lang] = segment.translated
+                match["_translated_languages"].add(segment.target_lang)
             match["revision"] += 1
             if room.record_session:
                 save_stream_transcript(match)
@@ -749,6 +792,13 @@ class RoomCoordinator:
         for code in codes:
             self.remove_cached_room(code)
 
+    def remove_user_connections(self, user_id: str) -> None:
+        """Account deletion also revokes guest connections in other hosts' rooms."""
+        with self._lock:
+            codes = [code for code, room in self.active_rooms.items() if user_id in room.participants]
+        for code in codes:
+            self.leave_room(code, user_id)
+
     def clear_transcripts(self, room_code: str, user_id: str, user_name: str = '') -> None:
         clean_code = room_code.strip().lower()
         room = self.get_or_load_room(clean_code)
@@ -757,6 +807,7 @@ class RoomCoordinator:
         with room.turn_lock:
             clear_room_transcripts(room.room_id)
             room.stream_turns.clear()
+            room.transcript_cutoffs = dict(room.speaker_audio_positions)
         self.broadcast_event(
             clean_code,
             'transcripts_cleared',
@@ -768,6 +819,15 @@ class RoomCoordinator:
         clean_code = room_code.strip().lower()
         room = self.get_or_load_room(clean_code)
         if not room:
+            record = get_room_by_code(clean_code)
+            if record and not record["is_active"]:
+                result = (_unsaved_conversation_notes(record["id"], record["title"])
+                          if not record["record_session"] else get_session_insights(record["id"])) or {
+                    "executive_summary": "The conversation ended. No session notes were saved.",
+                    "key_points": [], "action_items": [], "entities": {},
+                }
+                result["summary_method"] = "extractive" if self.config.translation_provider == "soniox" else "llm"
+                return result
             raise ValueError(f"Room '{clean_code}' not found.")
 
         with self._lock:
@@ -786,15 +846,7 @@ class RoomCoordinator:
         end_room(clean_code)
 
         if not room.record_session:
-            executive_summary = f"Conversation '{room.title}' ended. Saving was disabled, so no transcript or conversation notes were stored."
-            insights_data = {
-                "room_id": room.room_id,
-                "executive_summary": executive_summary,
-                "action_items": [],
-                "key_points": [],
-                "entities": {},
-                "recording_enabled": False,
-            }
+            insights_data = _unsaved_conversation_notes(room.room_id, room.title)
         else:
             # Fetch all transcripts
             transcripts = get_room_transcripts(room.room_id)
@@ -820,7 +872,7 @@ class RoomCoordinator:
                         executive_summary = str(getattr(ai_result, "executive_summary", "") or getattr(ai_result, "summary", ""))
                     action_items = list(getattr(ai_result, "action_items", []))
                     key_points = list(getattr(ai_result, "key_points", []))
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
                     logger.warning("Summarization failed on session end: %s", exc)
                     executive_summary = f"Session {room.title} concluded with {len(transcripts)} turns."
                     action_items = []
@@ -836,7 +888,7 @@ class RoomCoordinator:
                 combined_text = " ".join(t["original_text"] for t in transcripts)
                 try:
                     all_entities = self.entity_extractor.extract(combined_text)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Keep original text and other listeners on optional provider failure.
                     logger.debug("Entity extraction failed: %s", exc)
 
             # Save into session_insights table

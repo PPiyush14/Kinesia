@@ -4,7 +4,6 @@ import asyncio
 import io
 import logging
 import os
-from typing import Any
 
 from backend.config import AppConfig, ChannelConfig
 
@@ -118,6 +117,6 @@ class EdgeTtsClient:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     return pool.submit(lambda: asyncio.run(_bounded_synthesize())).result(timeout=18)
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Report unavailable synthesis to the legacy TTS router.
             logger.warning("Edge-TTS synthesis error for lang %s: %s", language, exc)
             return b""

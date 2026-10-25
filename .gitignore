@@ -30,6 +30,7 @@ frontend/playwright-report/
 !.env.example
 
 # Data & runtime
+.session_languages.json*
 data/*.db
 data/*.db-*
 session_conversations/*

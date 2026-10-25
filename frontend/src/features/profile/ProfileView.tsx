@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   User as UserIcon,
   Palette,
@@ -41,14 +41,25 @@ const AVATAR_COLORS = [
   { name: 'Indigo', value: '#6366F1' },
 ];
 
-export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onToast }: ProfileViewProps) {
+export function ProfileView({
+  user,
+  onUserUpdated,
+  onAccountDeleted,
+  onBack,
+  onToast,
+}: ProfileViewProps) {
   const [displayName, setDisplayName] = useState(user.display_name || '');
-  const [avatarColor, setAvatarColor] = useState(user.avatar_color || '#10B981');
+  const [avatarColor, setAvatarColor] = useState(
+    user.avatar_color || '#10B981',
+  );
   const [inputLang, setInputLang] = useState(user.default_input_lang || 'en');
-  const [outputLang, setOutputLang] = useState(user.default_output_lang || 'hi');
+  const [outputLang, setOutputLang] = useState(
+    user.default_output_lang || 'hi',
+  );
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const edited = useRef(false);
 
   const handleDeleteAccount = async () => {
     if (!confirmDelete) {
@@ -65,7 +76,10 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
         window.location.reload();
       }
     } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to delete account', 'error');
+      onToast(
+        err instanceof Error ? err.message : 'Failed to delete account',
+        'error',
+      );
       setDeleting(false);
       setConfirmDelete(false);
     }
@@ -90,11 +104,13 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
     authService
       .getMe()
       .then((freshUser) => {
-        if (!mounted) return;
+        if (!mounted || edited.current) return;
         setDisplayName(freshUser.display_name || freshUser.username);
         setAvatarColor(freshUser.avatar_color || '#10B981');
-        if (freshUser.default_input_lang) setInputLang(freshUser.default_input_lang);
-        if (freshUser.default_output_lang) setOutputLang(freshUser.default_output_lang);
+        if (freshUser.default_input_lang)
+          setInputLang(freshUser.default_input_lang);
+        if (freshUser.default_output_lang)
+          setOutputLang(freshUser.default_output_lang);
       })
       .catch((err) => {
         console.error('Failed to refresh profile', err);
@@ -129,7 +145,10 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
       onUserUpdated(updated);
       onToast('Profile preferences saved successfully', 'success');
     } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Failed to update profile', 'error');
+      onToast(
+        err instanceof Error ? err.message : 'Failed to update profile',
+        'error',
+      );
     } finally {
       setSaving(false);
     }
@@ -161,17 +180,26 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
           Profile & Preferences
         </h1>
         <p className="text-sm text-ink-muted">
-          Manage your personal profile and customize your default speaking, listening, and audio hardware settings.
+          Manage your personal profile and customize your default speaking,
+          listening, and audio hardware settings.
         </p>
       </div>
 
-      <form onSubmit={handleSave} className="space-y-6">
+      <form
+        onSubmit={handleSave}
+        onChangeCapture={() => {
+          edited.current = true;
+        }}
+        className="space-y-6"
+      >
         {/* Avatar & Identity Card */}
         <Card className="border border-border bg-surface-1/90 backdrop-blur-md">
           <CardHeader className="border-b border-border-subtle p-5 sm:p-6">
             <div className="flex items-center gap-2">
               <UserIcon size={18} className="text-accent" />
-              <h2 className="font-semibold text-ink-primary text-base">Identity & Avatar</h2>
+              <h2 className="font-semibold text-ink-primary text-base">
+                Identity & Avatar
+              </h2>
             </div>
           </CardHeader>
           <CardContent className="p-5 sm:p-6 space-y-6">
@@ -196,12 +224,16 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
                 </label>
                 <div className="flex flex-wrap items-center gap-2.5 justify-center sm:justify-start pt-1">
                   {AVATAR_COLORS.map((c) => {
-                    const isSelected = avatarColor.toLowerCase() === c.value.toLowerCase();
+                    const isSelected =
+                      avatarColor.toLowerCase() === c.value.toLowerCase();
                     return (
                       <button
                         key={c.value}
                         type="button"
-                        onClick={() => setAvatarColor(c.value)}
+                        onClick={() => {
+                          edited.current = true;
+                          setAvatarColor(c.value);
+                        }}
                         className={`h-8 w-8 rounded-xl flex items-center justify-center transition-all ${
                           isSelected
                             ? 'ring-2 ring-white ring-offset-2 ring-offset-canvas scale-110'
@@ -210,7 +242,12 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
                         style={{ backgroundColor: c.value }}
                         title={c.name}
                       >
-                        {isSelected && <Check size={14} className="text-white drop-shadow-sm" />}
+                        {isSelected && (
+                          <Check
+                            size={14}
+                            className="text-white drop-shadow-sm"
+                          />
+                        )}
                       </button>
                     );
                   })}
@@ -253,12 +290,15 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
           <CardHeader className="border-b border-border-subtle p-5 sm:p-6">
             <div className="flex items-center gap-2">
               <Languages size={18} className="text-accent-cyan" />
-              <h2 className="font-semibold text-ink-primary text-base">Language Defaults</h2>
+              <h2 className="font-semibold text-ink-primary text-base">
+                Language Defaults
+              </h2>
             </div>
           </CardHeader>
           <CardContent className="p-5 sm:p-6 space-y-4">
             <p className="text-xs text-ink-muted">
-              These dialects will be pre-selected automatically whenever you create or enter a room.
+              These dialects will be pre-selected automatically whenever you
+              create or enter a room.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-1.5">
@@ -283,20 +323,22 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
                   options={langOptions}
                 />
                 <p className="text-2xs text-ink-muted">
-                  The translated speech dialect you wish to read and hear in real-time.
+                  The translated speech dialect you wish to read and hear in
+                  real-time.
                 </p>
               </div>
             </div>
           </CardContent>
         </Card>
 
-
         {/* Audio Input & Speaker Output Settings Card */}
         <Card className="border border-border bg-surface-1/90 backdrop-blur-md">
           <CardHeader className="border-b border-border-subtle p-5 sm:p-6 flex flex-row items-center justify-between">
             <div className="flex items-center gap-2">
               <Mic size={18} className="text-accent" />
-              <h2 className="font-semibold text-ink-primary text-base">Audio & Speaker Hardware</h2>
+              <h2 className="font-semibold text-ink-primary text-base">
+                Audio & Speaker Hardware
+              </h2>
             </div>
             <button
               type="button"
@@ -310,7 +352,8 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
           </CardHeader>
           <CardContent className="p-5 sm:p-6 space-y-4">
             <p className="text-xs text-ink-muted">
-              Select your microphone and output speaker. These settings are saved automatically on this device.
+              Select your microphone and output speaker. These settings are
+              saved automatically on this device.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-1.5">
@@ -321,7 +364,10 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
                   onChange={(e) => changeInput(e.target.value)}
                   options={[
                     { value: 'default', label: 'Default Microphone' },
-                    ...inputs.map((d) => ({ value: d.deviceId, label: d.label })),
+                    ...inputs.map((d) => ({
+                      value: d.deviceId,
+                      label: d.label,
+                    })),
                   ]}
                 />
                 {!permissionGranted && (
@@ -343,7 +389,10 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
                   onChange={(e) => changeOutput(e.target.value)}
                   options={[
                     { value: 'default', label: 'Default System Speaker' },
-                    ...outputs.map((d) => ({ value: d.deviceId, label: d.label })),
+                    ...outputs.map((d) => ({
+                      value: d.deviceId,
+                      label: d.label,
+                    })),
                   ]}
                 />
                 <div className="pt-1">
@@ -353,7 +402,12 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
                     size="sm"
                     onClick={async () => {
                       const result = await testSpeaker(selectedOutput);
-                      onToast(result ? 'Test chime played on the selected output' : 'Speaker test failed. Check the device and browser support.', result ? 'info' : 'error');
+                      onToast(
+                        result
+                          ? 'Test chime played on the selected output'
+                          : 'Speaker test failed. Check the device and browser support.',
+                        result ? 'info' : 'error',
+                      );
                     }}
                     leftIcon={<Volume2 size={14} />}
                     className="text-xs"
@@ -377,9 +431,12 @@ export function ProfileView({ user, onUserUpdated, onAccountDeleted, onBack, onT
           <CardContent className="p-5 sm:p-6 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-1">
-                <h3 className="text-sm font-medium text-ink-primary">Delete Account</h3>
+                <h3 className="text-sm font-medium text-ink-primary">
+                  Delete Account
+                </h3>
                 <p className="text-xs text-ink-muted">
-                  Permanently delete your profile, credentials, and room associations. This cannot be undone.
+                  Permanently delete your profile, credentials, and room
+                  associations. This cannot be undone.
                 </p>
               </div>
               <div className="flex items-center gap-2">

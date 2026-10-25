@@ -226,7 +226,7 @@ export function AuthView({ pendingRoomCode, onAuthenticated, onToast }: AuthView
                 type={showPassword ? 'text' : 'password'}
                 value={regPassword}
                 onChange={(e) => setRegPassword(e.target.value)}
-                placeholder="Min. 8 characters"
+                placeholder="Min. 6 characters"
                 autoComplete="new-password"
                 rightSlot={
                   <button

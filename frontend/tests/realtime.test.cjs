@@ -87,6 +87,31 @@ const stream = () => {
   return { track, getTracks: () => [track] };
 };
 
+test('saved moments ignore an older list response after a newer bookmark change', async () => {
+  const pending = [];
+  const service = {
+    getMoments() { const item = deferred(); pending.push(item); return item.promise; },
+    async saveMoment() {}, async removeMoment() {},
+  };
+  const hook = hooks('useSavedMoments', {}, 'useSavedMoments', { '@/services/api': { roomService: service } });
+  let state = hook.render('room', () => {});
+  pending.shift().resolve([]);
+  await settle();
+  state = hook.render('room', () => {});
+  const saveA = state.toggle('room', 'a', false);
+  await settle();
+  const oldList = pending.shift();
+  const saveB = state.toggle('room', 'b', false);
+  await settle();
+  pending.shift().resolve([{ turn_id: 'a' }, { turn_id: 'b' }]);
+  await saveB;
+  oldList.resolve([{ turn_id: 'a' }]);
+  await saveA;
+  state = hook.render('room', () => {});
+  assert.deepEqual(Array.from(state.saved).sort(), ['a', 'b']);
+  hook.unmount();
+});
+
 test('local microphone speech preserves incoming translated audio during full-duplex conversation', async () => {
   const sockets = [], engines = [];
   class Socket {

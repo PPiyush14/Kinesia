@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from backend.config import AppConfig, _is_missing, load_config
 from backend.conversation_api import register_conversation_routes
 from backend.conversation_recap import RecapService
+from backend.core.exceptions import InvalidInputError
 from backend.dashboard_server import DashboardRequestHandler, DashboardState
 from backend.db.auth import get_user_profile, verify_token
 from backend.db.connection import is_postgres
@@ -36,6 +37,8 @@ def auth_user(token):
 
 
 def language(value):
+    if not isinstance(value, str):
+        raise InvalidInputError("Select a supported speaking/listening language.")
     code = normalize_language_code(value)
     if not code or code not in LANGUAGE_DISPLAY_NAMES:
         raise ValueError("Select a supported speaking/listening language.")
@@ -107,19 +110,22 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
                 await websocket.close(code=4401, reason="Session expired. Sign in again.")
                 return
             speaking, listening = language(hello.get("speaking_lang", "en")), language(hello.get("listening_lang", "hi"))
+            if not isinstance(hello.get("is_muted", False), bool):
+                raise InvalidInputError("Microphone mute must be true or false.")
             runtime, coordinator = app.state.rooms, app.state.dashboard.coordinator
             code = room_code.strip().lower()
-            # Admission limits protect a small Render instance and provider quotas.
-            peers = [value for (room, _), value in runtime.sessions.items() if room == code]
-            if len(peers) >= 8 and all(peer.user_id != user["id"] for peer in peers):
-                raise ValueError("This room currently supports up to eight participants.")
-            languages = {peer.participant.listening_lang for peer in peers if peer.participant} | {listening}
-            if len(languages) > config.realtime_max_languages:
-                raise ValueError(f"This room supports {config.realtime_max_languages} listening languages at once.")
-            room, events = await asyncio.to_thread(coordinator.join_room, code, user, speaking, listening)
-            subscription = (code, user["id"], events)
-            await asyncio.to_thread(coordinator.update_participant_status, code, user["id"], speaking, listening, bool(hello.get("is_muted", False)))
-            session = await runtime.attach(room, user, events, websocket)
+            async with runtime.admission_lock:
+                # Admission limits protect a small Render instance and provider quotas.
+                peers = [value for (room, _), value in runtime.sessions.items() if room == code]
+                if len(peers) >= 8 and all(peer.user_id != user["id"] for peer in peers):
+                    raise ValueError("This room currently supports up to eight participants.")
+                languages = {peer.participant.listening_lang for peer in peers if peer.participant} | {listening}
+                if len(languages) > config.realtime_max_languages:
+                    raise ValueError(f"This room supports {config.realtime_max_languages} listening languages at once.")
+                room, events = await asyncio.to_thread(coordinator.join_room, code, user, speaking, listening)
+                subscription = (code, user["id"], events)
+                await asyncio.to_thread(coordinator.update_participant_status, code, user["id"], speaking, listening, bool(hello.get("is_muted", False)))
+                session = await runtime.attach(room, user, events, websocket)
             session.send({"type": "connected", "data": {"room_code": code, "provider": "soniox", "tts_provider": "cartesia"}})
             if _is_missing(config.soniox_api_key) or _is_missing(config.cartesia_api_key):
                 session.error("Configure SONIOX_API_KEY and CARTESIA_API_KEY on the Render backend.")
@@ -145,26 +151,40 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
                         if len(message["text"]) > 4096:
                             raise ValueError("Control message is too large.")
                         event = json.loads(message["text"])
+                        if not isinstance(event, dict):
+                            raise ValueError("Control message must be a JSON object.")
                         if event.get("type") == "configure":
+                            if "is_muted" in event and not isinstance(event["is_muted"], bool):
+                                raise ValueError("Microphone mute must be true or false.")
                             controls += 1
                             if controls > 12:
                                 raise ValueError("Too many configuration updates; reconnect.")
-                            source = language(event.get("speaking_lang", session.participant.speaking_lang))
-                            target = language(event.get("listening_lang", session.participant.listening_lang))
-                            active_languages = {peer.participant.listening_lang for (room, _), peer in runtime.sessions.items()
-                                                if room == code and peer.participant and peer.user_id != user["id"]} | {target}
-                            if len(active_languages) > config.realtime_max_languages:
-                                session.error("The room's listening-language limit was reached.", "room")
+                            async with runtime.admission_lock:
+                                source = language(event.get("speaking_lang", session.participant.speaking_lang))
+                                target = language(event.get("listening_lang", session.participant.listening_lang))
+                                active_languages = {peer.participant.listening_lang for (room, _), peer in runtime.sessions.items()
+                                                    if room == code and peer.participant and peer.user_id != user["id"]} | {target}
+                                if len(active_languages) > config.realtime_max_languages:
+                                    session.error("The room's listening-language limit was reached.", "room")
+                                    continue
+                                listening_changed = target != session.participant.listening_lang
+                                await asyncio.to_thread(coordinator.update_participant_status, code, user["id"], source, target, event.get("is_muted"))
+                                if session.participant and session.participant.is_muted:
+                                    was_speaking = session.activity.active
+                                    runtime.voice(session, False)
+                                    if was_speaking:
+                                        coordinator.broadcast_event(code, "speaking", {"speaker_id": user["id"], "is_speaking": False})
+                                if listening_changed:
+                                    session.send({"type": "audio_reset"})
+                                await runtime.refresh(code)
+                        elif event.get("type") == "speaking":
+                            active = event.get("active")
+                            if not isinstance(active, bool):
+                                raise ValueError("Speaking activity must be true or false.")
+                            if active == session.activity.active or active and session.participant.is_muted:
                                 continue
-                            await asyncio.to_thread(coordinator.update_participant_status, code, user["id"], source, target, event.get("is_muted"))
-                            if session.participant and session.participant.is_muted:
-                                runtime.voice(session, False)
-                            session.send({"type": "audio_reset"})
-                            await runtime.refresh(code)
-                        elif event.get("type") == "speaking" and time.monotonic() - session.last_speaking_event > 0.15:
-                            session.last_speaking_event = time.monotonic()
-                            runtime.voice(session, bool(event.get("active")))
-                            coordinator.broadcast_event(code, "speaking", {"speaker_id": user["id"], "speaker_name": user.get("display_name"), "is_speaking": bool(event.get("active"))})
+                            runtime.voice(session, active)
+                            coordinator.broadcast_event(code, "speaking", {"speaker_id": user["id"], "speaker_name": user.get("display_name"), "is_speaking": active})
                         elif event.get("type") == "ping":
                             session.send({"type": "pong", "data": event.get("data")})
             tasks = [asyncio.create_task(read()), asyncio.create_task(session.writer()), asyncio.create_task(session.bridge_events())]
@@ -179,7 +199,7 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
             with contextlib.suppress(Exception):
                 await websocket.send_json({"type": "pipeline_error", "data": {"provider": "room", "message": str(exc)}})
                 await websocket.close(code=4400, reason="Room configuration failed.")
-        except Exception as exc:  # noqa: BLE001 - public boundary must not leak provider credentials.
+        except Exception as exc:  # noqa: BLE001 - Close failed public connections without provider details.
             logger.warning("Realtime connection stopped (%s)", type(exc).__name__)
             with contextlib.suppress(Exception):
                 await websocket.close(code=1011, reason="Connection interrupted; please reconnect.")
@@ -207,32 +227,36 @@ def create_app(config: AppConfig | None = None, *, state_factory=DashboardState)
             content.extend(chunk)
             if len(content) > 8 * 1024 * 1024:
                 return JSONResponse({"error": "Request exceeds the audio upload limit."}, status_code=413)
+        async def forward():
+            headers = {key: value for key, value in request.headers.items() if key.lower() not in {"host", "connection", "transfer-encoding", "content-length"}}
+            url = "/" + path + ("?" + request.url.query if request.url.query else "")
+            upstream = app.state.rest.build_request(request.method, url, content=bytes(content), headers=headers)
+            try:
+                response = await app.state.rest.send(upstream, stream=True)
+            except httpx.HTTPError:
+                return JSONResponse({"ok": False, "error": "Backend temporarily unavailable.", "data": None}, status_code=503)
+            if response.status_code >= 500:
+                await response.aclose()
+                return JSONResponse({"ok": False, "error": "The request could not be completed. Check the backend logs and provider configuration.", "data": None}, status_code=500)
+            async def body():
+                try:
+                    async for chunk in response.aiter_raw():
+                        yield chunk
+                finally:
+                    await response.aclose()
+            response_headers = {key: value for key, value in response.headers.items()
+                                if key.lower() not in {"connection", "transfer-encoding", "server", "date", "access-control-allow-origin"}}
+            return StreamingResponse(body(), status_code=response.status_code, headers=response_headers)
         if request.method == "POST" and path.startswith("api/v1/rooms/") and path.endswith("/end"):
             token = request.headers.get("authorization", "").removeprefix("Bearer ")
             user = await asyncio.to_thread(auth_user, token)
             code = path.split("/")[3]
             record = await asyncio.to_thread(get_room_by_code, code)
             if user and record and str(record["host_id"]) == str(user["id"]):
-                await app.state.rooms.flush_room(code)
-        headers = {key: value for key, value in request.headers.items() if key.lower() not in {"host", "connection", "transfer-encoding", "content-length"}}
-        url = "/" + path + ("?" + request.url.query if request.url.query else "")
-        upstream = app.state.rest.build_request(request.method, url, content=bytes(content), headers=headers)
-        try:
-            response = await app.state.rest.send(upstream, stream=True)
-        except httpx.HTTPError:
-            return JSONResponse({"ok": False, "error": "Backend temporarily unavailable.", "data": None}, status_code=503)
-        if response.status_code >= 500:
-            await response.aclose()
-            return JSONResponse({"ok": False, "error": "The request could not be completed. Check the backend logs and provider configuration.", "data": None}, status_code=500)
-        async def body():
-            try:
-                async for chunk in response.aiter_raw():
-                    yield chunk
-            finally:
-                await response.aclose()
-        response_headers = {key: value for key, value in response.headers.items()
-                            if key.lower() not in {"connection", "transfer-encoding", "server", "date", "access-control-allow-origin"}}
-        return StreamingResponse(body(), status_code=response.status_code, headers=response_headers)
+                async with app.state.rooms.admission_lock:
+                    await app.state.rooms.flush_room(code)
+                    return await forward()
+        return await forward()
 
     return app
 

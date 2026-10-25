@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
-from unittest.mock import patch
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from websockets import ConnectionClosedOK
@@ -73,26 +72,22 @@ def test_clip_does_not_promote_partial_tokens_on_finish(sample_config):
 
 def test_clip_rejects_early_close_instead_of_publishing_truncated_text(sample_config):
     socket = ClipSocket([{"tokens": [token("incomplete")]}, ConnectionClosedOK(None, None)])
-    with patch("backend.soniox_client.connect", return_value=socket):
-        with pytest.raises(RuntimeError, match="before confirming"):
-            SonioxClient(sample_config)._transcribe_pcm16_once(b"\0\0")
+    with patch("backend.soniox_client.connect", return_value=socket), pytest.raises(RuntimeError, match="before confirming"):
+        SonioxClient(sample_config)._transcribe_pcm16_once(b"\0\0")
     assert socket.closed
 
 
 def test_clip_timeout_closes_socket(sample_config):
     socket = ClipSocket([])
-    with patch("backend.soniox_client.connect", return_value=socket), \
-         patch("backend.soniox_client.time.monotonic", side_effect=[0, 31]):
-        with pytest.raises(TimeoutError, match="in time"):
-            SonioxClient(sample_config)._transcribe_pcm16_once(b"\0\0")
+    with patch("backend.soniox_client.connect", return_value=socket), patch("backend.soniox_client.time.monotonic", side_effect=[0, 31]), pytest.raises(TimeoutError, match="in time"):
+        SonioxClient(sample_config)._transcribe_pcm16_once(b"\0\0")
     assert socket.closed
 
 
 def test_provider_error_closes_socket(sample_config):
     socket = ClipSocket([{"error_code": 401, "error_message": "Unauthorized"}])
-    with patch("backend.soniox_client.connect", return_value=socket):
-        with pytest.raises(RuntimeError, match="Soniox error 401"):
-            SonioxClient(sample_config)._transcribe_pcm16_once(b"\0\0")
+    with patch("backend.soniox_client.connect", return_value=socket), pytest.raises(RuntimeError, match="Soniox error 401"):
+        SonioxClient(sample_config)._transcribe_pcm16_once(b"\0\0")
     assert socket.closed
 
 
@@ -108,7 +103,7 @@ def test_live_parser_consumes_tokens_after_an_endpoint_in_same_response(sample_c
 def test_live_parser_does_not_finalize_a_partial_endpoint(sample_config):
     client = SonioxClient(sample_config)
     final = []
-    result, interim = client._parse_tokens([token("guess", False), token("<end>", False)], final)
+    result, _interim = client._parse_tokens([token("guess", False), token("<end>", False)], final)
     assert result is None
     assert final == []
 

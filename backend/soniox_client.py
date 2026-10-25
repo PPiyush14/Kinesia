@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import Counter
@@ -12,6 +13,8 @@ from websockets.sync.client import connect
 
 from backend.audio import CapturedAudio, MicrophoneRecorder
 from backend.config import AppConfig, ChannelConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -251,7 +254,7 @@ class SonioxClient:
                         stop_event=capture_stop_event,
                         pause_event=utterance_pause_event,
                     )
-                except BaseException as exc:  # pragma: no cover - thread handoff
+                except BaseException as exc:  # pragma: no cover - thread handoff  # noqa: BLE001 - Hand socket/capture failures to the parent or finish cleanup.
                     if not capture_stop_event.is_set():
                         capture_error.append(exc)
                 finally:
@@ -259,8 +262,8 @@ class SonioxClient:
                         if utterance_audio.has_audio():
                             with send_lock:
                                 websocket.send(json.dumps({"type": "finalize", "trailing_silence_ms": 300}))
-                    except Exception:
-                        pass
+                    except Exception as cleanup_error:  # noqa: BLE001 - Hand socket/capture failures to the parent or finish cleanup.
+                        logger.debug("Provider cleanup/probe failed (%s)", type(cleanup_error).__name__)
 
             def watch_for_stop_request() -> None:
                 if stop_event is None:
@@ -272,8 +275,8 @@ class SonioxClient:
                         utterance_pause_event.set()
                         try:
                             websocket.close()
-                        except Exception:
-                            pass
+                        except Exception as cleanup_error:  # noqa: BLE001 - Hand socket/capture failures to the parent or finish cleanup.
+                            logger.debug("Provider cleanup/probe failed (%s)", type(cleanup_error).__name__)
                         return
 
             capture_thread = threading.Thread(target=capture_audio, daemon=True)
@@ -360,7 +363,7 @@ class SonioxClient:
                     raise
             except GeneratorExit:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Hand socket/capture failures to the parent or finish cleanup.
                 receiver_error.append(exc)
             finally:
                 connection_stop_event.set()
@@ -574,7 +577,7 @@ class SonioxClient:
                 # An empty TEXT frame ends a finite stream. `finalize` keeps it
                 # open and can produce several endpoints before all audio is done.
                 websocket.send("")
-        except BaseException as exc:  # pragma: no cover - defensive thread capture
+        except BaseException as exc:  # pragma: no cover - defensive thread capture  # noqa: BLE001 - Hand socket/capture failures to the parent or finish cleanup.
             sender_error.append(exc)
 
     def _send_keepalives(
@@ -587,7 +590,7 @@ class SonioxClient:
             try:
                 with send_lock:
                     websocket.send(json.dumps({"type": "keepalive"}))
-            except Exception:
+            except Exception:  # noqa: BLE001 - Hand socket/capture failures to the parent or finish cleanup.
                 return
 
     def _should_retry_session_error(
@@ -609,9 +612,7 @@ class SonioxClient:
             "unsupported",
             "bad request",
         )
-        if any(marker in message for marker in non_retryable_markers):
-            return False
-        return True
+        return not any(marker in message for marker in non_retryable_markers)
 
     def _retry_delay_for_attempt(self, attempt: int) -> float:
         delay = self.session_retry_delay_seconds * (2 ** max(0, attempt - 1))

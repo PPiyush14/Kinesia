@@ -62,6 +62,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
   const [elapsed, setElapsed] = useState(0);
   const actions = useRef<{ playEncoded: (url: string) => void; cancelAudio: () => void } | null>(null);
   const completed = useRef(false);
+  const historyRevision = useRef(0);
   const scroll = useRef<HTMLDivElement | null>(null);
   const rememberCaption = (turn: TranscriptTurn) => setPeerCaptions((previous) => {
     const key = String(turn.speaker_id);
@@ -117,6 +118,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
       },
       onSessionConcluded: (insights) => finish(insights as SessionInsights),
       onTranscriptsCleared: () => {
+        historyRevision.current++;
         setTranscripts([]);
         setPeerCaptions({});
         savedMoments.refresh();
@@ -144,8 +146,9 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
   useEffect(() => {
     if (!live.connected) { setSpeakingIds(new Set()); return; }
     let cancelled = false;
+    const revision = ++historyRevision.current;
     roomService.getTranscripts(room.room_code).then((history) => {
-      if (!cancelled) setTranscripts((current) => mergeTranscriptHistory(history, current, listeningLang));
+      if (!cancelled && revision === historyRevision.current) setTranscripts((current) => mergeTranscriptHistory(history, current, listeningLang));
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [room.room_code, live.connected, listeningLang]);
@@ -201,6 +204,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
       if (modal === 'end') finish(await roomService.endSession(room.room_code));
       else if (modal === 'clear') {
         await roomService.clearTranscripts(room.room_code);
+        historyRevision.current++;
         setTranscripts([]);
         setPeerCaptions({});
       } else {
@@ -619,7 +623,7 @@ export function DialogueCanvas(props: DialogueCanvasProps) {
                 {modal === 'end'
                   ? 'Everyone will leave the live room. Saved transcripts and session notes will be available afterward.'
                   : modal === 'clear'
-                    ? 'This removes the shared transcript and saved notes for everyone in the room. New speech can still be recorded while the room is active.'
+                    ? 'This removes the transcript, recaps and saved moments for everyone. Saving resumes with the next new phrase.'
                     : 'Your microphone and audio will disconnect. You can rejoin while the room is active.'}
               </p>
               <div className="mt-6 flex justify-end gap-2">

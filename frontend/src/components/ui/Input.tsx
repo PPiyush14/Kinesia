@@ -10,12 +10,19 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, label, error, hint, leftSlot, rightSlot, id, ...props }, ref) => {
-    const inputId = id ?? props.name;
+  (
+    { className, label, error, hint, leftSlot, rightSlot, id, ...props },
+    ref,
+  ) => {
+    const generatedId = React.useId();
+    const inputId = id ?? props.name ?? generatedId;
     return (
       <div className="w-full space-y-1.5">
         {label && (
-          <label htmlFor={inputId} className="block text-xs font-medium text-ink-secondary tracking-wide">
+          <label
+            htmlFor={inputId}
+            className="block text-xs font-medium text-ink-secondary tracking-wide"
+          >
             {label}
           </label>
         )}
@@ -28,6 +35,8 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
           <input
             ref={ref}
             id={inputId}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error || hint ? `${inputId}-message` : undefined}
             className={cn(
               'w-full h-11 rounded-xl bg-surface-0 border border-border text-ink-primary text-sm placeholder:text-ink-faint',
               'px-3.5 transition-colors duration-150',
@@ -35,22 +44,29 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
               'disabled:opacity-50 disabled:cursor-not-allowed',
               leftSlot && 'pl-10',
               rightSlot && 'pr-10',
-              error && 'border-danger/60 focus:border-danger focus:ring-danger/20',
-              className
+              error &&
+                'border-danger/60 focus:border-danger focus:ring-danger/20',
+              className,
             )}
             {...props}
           />
           {rightSlot && (
-            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-muted">{rightSlot}</div>
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-muted">
+              {rightSlot}
+            </div>
           )}
         </div>
         {error ? (
-          <p className="text-2xs text-danger">{error}</p>
+          <p id={`${inputId}-message`} className="text-2xs text-danger">
+            {error}
+          </p>
         ) : hint ? (
-          <p className="text-2xs text-ink-muted">{hint}</p>
+          <p id={`${inputId}-message`} className="text-2xs text-ink-muted">
+            {hint}
+          </p>
         ) : null}
       </div>
     );
-  }
+  },
 );
 Input.displayName = 'Input';

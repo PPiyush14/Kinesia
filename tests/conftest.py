@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
-from unittest.mock import MagicMock
 
 import pytest
 
 from backend.config import AppConfig, ChannelConfig
 from backend.conversation_store import SessionConversationStore
-from backend.storage.glossary import GlossaryEntry, GlossaryStore
+from backend.storage.glossary import GlossaryStore
 
 
 @pytest.fixture(autouse=True)

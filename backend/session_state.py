@@ -4,10 +4,11 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from backend.config import AppConfig
 

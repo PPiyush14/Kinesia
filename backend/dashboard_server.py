@@ -20,31 +20,38 @@ from backend.api.webhook import WebhookDispatcher
 from backend.audio import MicrophoneRecorder
 from backend.config import AppConfig
 from backend.conversation_store import SessionConversationStore
+from backend.core.exceptions import InvalidInputError
+from backend.db.auth import (
+    authenticate_user,
+    delete_user_account,
+    get_user_profile,
+    register_user,
+    update_user_profile,
+    verify_token,
+)
+from backend.db.connection import init_db
+from backend.db.rooms import (
+    add_participant,
+    clear_room_transcripts,
+    create_room,
+    get_room_by_code,
+    get_room_transcripts,
+    get_session_insights,
+    hide_all_room_history,
+    hide_room_from_history,
+    is_room_member,
+    list_user_rooms,
+    verify_room_access,
+)
 from backend.gemma_client import GemmaClient
 from backend.languages import LANGUAGE_DISPLAY_NAMES, normalize_language_code
 from backend.nlp.aggregator import BIAggregator
 from backend.nlp.entity_extractor import EntityExtractor
 from backend.nlp.summarizer import ConversationSummarizer
 from backend.pipeline import TranslationRunResult, TranslatorPipeline
+from backend.rooms.coordinator import RoomCoordinator
 from backend.session_state import SessionInfo, SessionLanguageStore
 from backend.storage.glossary import GlossaryStore
-from backend.db.auth import authenticate_user, get_user_profile, register_user, verify_token, update_user_profile, delete_user_account
-from backend.db.connection import init_db
-from backend.db.rooms import (
-    add_participant,
-    create_room,
-    get_room_by_code,
-    clear_room_transcripts,
-    hide_room_from_history,
-    hide_all_room_history,
-    is_room_member,
-    get_room_transcripts,
-    get_session_insights,
-    list_active_participants,
-    list_user_rooms,
-    verify_room_access,
-)
-from backend.rooms.coordinator import RoomCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -116,19 +123,17 @@ class DashboardState:
             self.summarizer = ConversationSummarizer(self.gemma_client)
         self.aggregator = BIAggregator()
         self.webhook = WebhookDispatcher(base_config.webhook_url, base_config.webhook_secret)
-        try:
-            self.entity_extractor: EntityExtractor | None = EntityExtractor()
-        except Exception:
-            self.entity_extractor = None
+        self.entity_extractor: EntityExtractor | None = None
 
         # Initialize Kinesia DB & Multi-Party Room Coordinator
         try:
             init_db()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
             if base_config.translation_provider == "soniox":
                 raise RuntimeError("Database initialization failed. Check DATABASE_URL on the backend service.") from None
             logger.warning("Database initialization notice: %s", exc)
         self.coordinator = RoomCoordinator(base_config)
+        self.entity_extractor = self.coordinator.entity_extractor
 
         session_info = self.session_store.start_or_join_session()
         self.conversation_store.ensure_session(
@@ -165,7 +170,7 @@ class DashboardState:
                 "error": None,
                 "refreshed_at": time.time(),
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
             snapshot = {
                 "inputs": [],
                 "outputs": [],
@@ -316,14 +321,14 @@ class DashboardState:
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         channels_payload = payload.get("channels")
         if not isinstance(channels_payload, dict):
-            raise ValueError("Expected a 'channels' object in the request body.")
+            raise InvalidInputError("Expected a 'channels' object in the request body.")
 
         updated_settings: dict[str, dict[str, Any]] = {}
         for channel_key, raw_updates in channels_payload.items():
             if channel_key not in self._channel_settings:
                 raise ValueError(f"Unknown channel '{channel_key}'.")
             if not isinstance(raw_updates, dict):
-                raise ValueError(f"Expected an object for channel '{channel_key}'.")
+                raise InvalidInputError(f"Expected an object for channel '{channel_key}'.")
 
             current = dict(self._channel_settings[channel_key])
             if "input_device" in raw_updates:
@@ -461,7 +466,7 @@ class DashboardState:
                     summary_payload = summary_result.to_dict()
                     self.conversation_store.save_summary(ended.session_id, summary_payload)
                     self.webhook.dispatch_session_summary_async(ended.session_id, summary_payload)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
                 logger.warning("Failed to auto-summarize or dispatch webhook on session end: %s", exc)
         else:
             self._log_system("End session requested, but no active session was present.")
@@ -548,7 +553,7 @@ class DashboardState:
                         target_turn["transcript"],
                         new_translation,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
                     logger.warning("Entity extraction on retranslation failed: %s", exc)
 
         updated_turn = self.conversation_store.update_turn(resolved_id, turn_index, updates)
@@ -652,7 +657,7 @@ class DashboardState:
                     status="listening",
                     transcript="",
                 )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
             if not stop_event.is_set():
                 with self._lock:
                     self._last_errors[channel_key] = str(exc)
@@ -699,7 +704,7 @@ class DashboardState:
                     result.captured_audio.raw_pcm_s16le,
                     sample_rate=result.captured_audio.sample_rate,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
                 logger.warning("Failed to save turn audio: %s", exc)
 
         turn = {
@@ -1004,7 +1009,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept")
         self.send_header("Access-Control-Max-Age", "86400")
 
-    def do_OPTIONS(self) -> None:  # noqa: N802
+    def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self._send_cors_headers()
         self.end_headers()
@@ -1036,7 +1041,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(content)
         except FileNotFoundError:
             self.send_error(HTTPStatus.NOT_FOUND, "Audio file not found")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
     def _get_auth_user(self) -> dict[str, Any] | None:
@@ -1066,7 +1071,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 speaking_lang=speaking_lang,
                 listening_lang=listening_lang,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Preserve HTTP/session availability at the device or worker boundary.
             self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
@@ -1124,7 +1129,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             except queue.Empty:
                 self._write_sse_comment("keepalive")
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         query_params = parse_qs(parsed_url.query)
@@ -1269,8 +1274,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                                 }
                                 for p in coord_room.participants.values()
                             ]
-                if not participants:
-                    participants = list_active_participants(room["id"])
+                # Connection ownership is process-local; persisted membership
+                # survives restarts and passcode grants but is not live presence.
                 self._send_v1_json(participants)
                 return
 
@@ -1328,13 +1333,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         is_v1 = path.startswith("/api/v1/")
 
         try:
             payload = self._read_json_body()
+            if path.startswith(("/api/v1/auth/", "/api/v1/rooms")) and not isinstance(payload, dict):
+                raise ValueError("Request body must be a JSON object.")
         except ValueError as exc:
             if is_v1:
                 self._send_v1_error(str(exc), status=HTTPStatus.BAD_REQUEST)
@@ -1362,10 +1369,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/v1/insights/") and path.endswith("/summarize"):
                 session_id = path.split("/")[4]
                 response = self.state.generate_session_summary(session_id)
-            elif (path.startswith("/api/channels/") or path.startswith("/api/v1/channels/")) and path.endswith("/start"):
+            elif (path.startswith(("/api/channels/", "/api/v1/channels/"))) and path.endswith("/start"):
                 channel_key = path.split("/")[4 if is_v1 else 3]
                 response = self.state.start_channel(channel_key)
-            elif (path.startswith("/api/channels/") or path.startswith("/api/v1/channels/")) and path.endswith("/stop"):
+            elif (path.startswith(("/api/channels/", "/api/v1/channels/"))) and path.endswith("/stop"):
                 channel_key = path.split("/")[4 if is_v1 else 3]
                 response = self.state.stop_channel(channel_key)
             # Kinesia Auth & Room Endpoints
@@ -1402,7 +1409,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if valid and user:
                     room = get_room_by_code(room_code)
                     if room and not is_room_member(room["id"], user["id"]):
-                        add_participant(room["id"], user["id"], user.get("display_name") or user["username"])
+                        add_participant(room["id"], user["id"], user.get("display_name") or user["username"], active=False)
                 response = {"valid": valid}
             elif path.startswith("/api/v1/rooms/") and path.endswith("/speak"):
                 user = self._get_auth_user()
@@ -1416,7 +1423,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     speaker_name=user.get("display_name") or user["username"],
                     text=payload.get("text", ""),
                     source_lang=payload.get("source_lang", "en"),
-                    confidence=float(payload.get("confidence", 1.0)),
+                    confidence=payload.get("confidence", 1.0),
                     utterance_id=payload.get("utterance_id"),
                 )
             elif path.startswith("/api/v1/rooms/") and path.endswith("/speak-audio"):
@@ -1426,14 +1433,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     return
                 room_code = path.split("/")[4]
                 audio_b64 = payload.get("audio_base64", "")
+                if not isinstance(audio_b64, str):
+                    raise ValueError("audio_base64 must be text.")
                 if not audio_b64:
                     self._send_v1_error("audio_base64 is required", status=HTTPStatus.BAD_REQUEST)
                     return
                 import base64
                 if "," in audio_b64:
                     audio_b64 = audio_b64.split(",", 1)[1]
-                audio_bytes = base64.b64decode(audio_b64)
+                audio_bytes = base64.b64decode(audio_b64, validate=True)
                 mime = payload.get("mime_type", "audio/webm")
+                if not isinstance(mime, str) or len(mime) > 100:
+                    raise ValueError("mime_type must be a valid audio content type.")
                 response = self.state.coordinator.process_audio_utterance(
                     room_code=room_code,
                     speaker_id=user["id"],
@@ -1488,12 +1499,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
-        except Exception as exc:  # pragma: no cover
-            logger.exception("dashboard_request_failed path=%s", path)
+        except Exception as exc:  # noqa: BLE001 - sanitize the public HTTP failure boundary.
+            logger.warning("dashboard_request_failed path=%s error=%s", path, type(exc).__name__)
             if is_v1:
-                self._send_v1_error(f"Server error: {exc}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                self._send_v1_error("The request could not be completed. Please retry.", status=HTTPStatus.INTERNAL_SERVER_ERROR)
             else:
-                self._send_json({"error": f"Server error: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                self._send_json({"error": "The request could not be completed. Please retry."}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if is_v1:
@@ -1501,7 +1512,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(response)
 
-    def do_DELETE(self) -> None:  # noqa: N802
+    def do_DELETE(self) -> None:
         parsed_url = urlparse(self.path)
         path = parsed_url.path
 
@@ -1511,12 +1522,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_v1_error("Unauthorized", status=HTTPStatus.UNAUTHORIZED)
                 return
             try:
-                self.state.coordinator.remove_hosted_cached_rooms(user["id"])
                 delete_user_account(user["id"])
+                self.state.coordinator.remove_hosted_cached_rooms(user["id"])
+                self.state.coordinator.remove_user_connections(user["id"])
                 self._send_v1_json({"ok": True, "message": "Account successfully deleted"})
                 return
-            except Exception as exc:
-                self._send_v1_error(f"Failed to delete account: {exc}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            except Exception as exc:  # noqa: BLE001 - return a controlled account-operation failure.
+                logger.warning("Account deletion failed (%s)", type(exc).__name__)
+                self._send_v1_error("The account could not be deleted. Please retry.", status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
 
         if path in {"/api/v1/rooms", "/api/v1/rooms/clear-all"}:
@@ -1545,13 +1558,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     self._send_v1_error("Only the host can clear the shared transcript", status=HTTPStatus.FORBIDDEN)
                     return
                 try:
-                    self.state.coordinator.clear_transcripts(
-                        room_code,
-                        user["id"],
-                        user.get("display_name") or user.get("username", ""),
-                    )
-                except Exception:
-                    clear_room_transcripts(room["id"])
+                    if room["is_active"]:
+                        self.state.coordinator.clear_transcripts(
+                            room_code, user["id"], user.get("display_name") or user.get("username", ""))
+                    else:
+                        clear_room_transcripts(room["id"])
+                except Exception as exc:  # noqa: BLE001 - a failed clear must never be reported as success.
+                    logger.warning("Transcript clear failed (%s)", type(exc).__name__)
+                    self._send_v1_error("The transcript could not be cleared. Please retry.", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
                 self._send_v1_json({"ok": True, "message": "Transcripts cleared"})
                 return
 
@@ -1573,9 +1588,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
-    def do_PATCH(self) -> None:  # noqa: N802
+    def do_PATCH(self) -> None:
         path = urlparse(self.path).path
-        payload = self._read_json_body()
+        try:
+            payload = self._read_json_body()
+            if not isinstance(payload, dict):
+                raise InvalidInputError("Request body must be a JSON object.")
+        except ValueError as exc:
+            self._send_v1_error(str(exc), status=HTTPStatus.BAD_REQUEST)
+            return
 
         if path == "/api/v1/auth/profile":
             user = self._get_auth_user()
@@ -1598,8 +1619,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._send_v1_json(updated)
                 return
-            except Exception as exc:
-                self._send_v1_error(f"Failed to update profile: {exc}", status=HTTPStatus.BAD_REQUEST)
+            except ValueError as exc:
+                self._send_v1_error(str(exc), status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:  # noqa: BLE001 - never expose database/provider details in a profile response.
+                logger.warning("Profile update failed (%s)", type(exc).__name__)
+                self._send_v1_error("The profile could not be updated. Please retry.", status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
 
         # Route: PATCH /api/v1/sessions/{session_id}/turns/{turn_index}
@@ -1631,7 +1656,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
-    def log_message(self, format: str, *args) -> None:  # noqa: A003
+    def log_message(self, format: str, *args) -> None:
         # EventSource authenticates via the query string; never log its token.
         safe_args = tuple(
             re.sub(r"([?&]token=)[^&\s\"]+", r"\1[REDACTED]", arg) if isinstance(arg, str) else arg
@@ -1648,10 +1673,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return {}
         try:
             parsed = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON body: {exc}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError("Invalid JSON body.") from exc
         if not isinstance(parsed, (dict, list)):
-            raise ValueError("Request body must be a JSON object or array.")
+            raise InvalidInputError("Request body must be a JSON object or array.")
         return parsed
 
     def _serve_static(self, filename: str) -> None:
@@ -1710,7 +1735,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self.state.unsubscribe_events(subscriber)
 
     def _write_sse_comment(self, text: str) -> None:
-        self.wfile.write(f": {text}\n\n".encode("utf-8"))
+        self.wfile.write(f": {text}\n\n".encode())
         self.wfile.flush()
 
     def _write_sse_event(
@@ -1720,7 +1745,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     ) -> None:
         body = json.dumps(payload, ensure_ascii=True)
         self.wfile.write(
-            f"event: {event_type}\ndata: {body}\n\n".encode("utf-8")
+            f"event: {event_type}\ndata: {body}\n\n".encode()
         )
         self.wfile.flush()
 

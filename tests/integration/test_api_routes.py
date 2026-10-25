@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from http.server import ThreadingHTTPServer
 from urllib import request
-from urllib.error import HTTPError
 
 import pytest
 

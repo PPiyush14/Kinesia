@@ -10,9 +10,10 @@ import logging
 import os
 import sqlite3
 import threading
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator, Sequence
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def get_database_url() -> str:
 def is_postgres() -> bool:
     """Check if the configured database is PostgreSQL."""
     url = get_database_url()
-    return url.startswith("postgres://") or url.startswith("postgresql://")
+    return url.startswith(("postgres://", "postgresql://"))
 
 
 def _get_sqlite_path() -> Path:
@@ -100,6 +101,7 @@ def get_db() -> Generator[DatabaseConnection, None, None]:
     else:
         db_path = _get_sqlite_path()
         raw_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        raw_conn.execute("PRAGMA foreign_keys = ON")
         conn_obj = DatabaseConnection(raw_conn, is_pg=False)
 
     try:
@@ -114,144 +116,142 @@ def get_db() -> Generator[DatabaseConnection, None, None]:
 
 def init_db() -> None:
     """Initialize database tables idempotently."""
-    with _DB_LOCK:
-        with get_db() as db:
-            pg = db.is_pg
-            if pg:
-                try:
-                    db.raw_conn.autocommit = True
-                except Exception:
-                    pass
+    with _DB_LOCK, get_db() as db:
+        pg = db.is_pg
+        if pg:
+            db.raw_conn.autocommit = True
 
-            bool_type = "BOOLEAN"
-            real_type = "DOUBLE PRECISION" if pg else "REAL"
+        bool_type = "BOOLEAN"
+        real_type = "DOUBLE PRECISION" if pg else "REAL"
 
-            db.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS users (
-                    id VARCHAR(36) PRIMARY KEY,
-                    username VARCHAR(50) UNIQUE NOT NULL,
-                    email VARCHAR(100) UNIQUE NOT NULL,
-                    password_hash VARCHAR(255) NOT NULL,
-                    salt VARCHAR(64) NOT NULL,
-                    display_name VARCHAR(100) NOT NULL,
-                    avatar_color VARCHAR(20) DEFAULT '#10B981',
-                    default_input_lang VARCHAR(10) DEFAULT 'en',
-                    default_output_lang VARCHAR(10) DEFAULT 'hi',
-                    gender VARCHAR(10) DEFAULT 'female',
-                    created_at {real_type} NOT NULL
-                )
-                """
+        db.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS users (
+                id VARCHAR(36) PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                email VARCHAR(100) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                salt VARCHAR(64) NOT NULL,
+                display_name VARCHAR(100) NOT NULL,
+                avatar_color VARCHAR(20) DEFAULT '#10B981',
+                default_input_lang VARCHAR(10) DEFAULT 'en',
+                default_output_lang VARCHAR(10) DEFAULT 'hi',
+                gender VARCHAR(10) DEFAULT 'female',
+                created_at {real_type} NOT NULL
             )
+            """
+        )
 
-            db.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS rooms (
-                    id VARCHAR(36) PRIMARY KEY,
-                    room_code VARCHAR(20) UNIQUE NOT NULL,
-                    title VARCHAR(200) NOT NULL,
-                    passcode_hash VARCHAR(255),
-                    host_id VARCHAR(36) REFERENCES users(id),
-                    record_session {bool_type} DEFAULT TRUE,
-                    is_active {bool_type} DEFAULT TRUE,
-                    created_at {real_type} NOT NULL,
-                    ended_at {real_type}
-                )
-                """
+        db.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS rooms (
+                id VARCHAR(36) PRIMARY KEY,
+                room_code VARCHAR(20) UNIQUE NOT NULL,
+                title VARCHAR(200) NOT NULL,
+                passcode_hash VARCHAR(255),
+                host_id VARCHAR(36) REFERENCES users(id),
+                record_session {bool_type} DEFAULT TRUE,
+                is_active {bool_type} DEFAULT TRUE,
+                created_at {real_type} NOT NULL,
+                ended_at {real_type}
             )
+            """
+        )
 
-            db.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS room_participants (
-                    id VARCHAR(36) PRIMARY KEY,
-                    room_id VARCHAR(36) REFERENCES rooms(id),
-                    user_id VARCHAR(36) REFERENCES users(id),
-                    user_name VARCHAR(100) NOT NULL,
-                    joined_at {real_type} NOT NULL,
-                    left_at {real_type},
-                    speaking_lang VARCHAR(10) DEFAULT 'en',
-                    listening_lang VARCHAR(10) DEFAULT 'hi',
-                    is_mic_muted {bool_type} DEFAULT FALSE
-                )
-                """
+        db.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS room_participants (
+                id VARCHAR(36) PRIMARY KEY,
+                room_id VARCHAR(36) REFERENCES rooms(id),
+                user_id VARCHAR(36) REFERENCES users(id),
+                user_name VARCHAR(100) NOT NULL,
+                joined_at {real_type} NOT NULL,
+                left_at {real_type},
+                speaking_lang VARCHAR(10) DEFAULT 'en',
+                listening_lang VARCHAR(10) DEFAULT 'hi',
+                is_mic_muted {bool_type} DEFAULT FALSE
             )
+            """
+        )
 
-            db.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS transcripts (
-                    id VARCHAR(36) PRIMARY KEY,
-                    room_id VARCHAR(36) REFERENCES rooms(id),
-                    speaker_id VARCHAR(36),
-                    speaker_name VARCHAR(100) NOT NULL,
-                    original_text TEXT NOT NULL,
-                    source_lang VARCHAR(10) NOT NULL,
-                    confidence {real_type} DEFAULT 1.0,
-                    translations_json TEXT NOT NULL,
-                    timestamp {real_type} NOT NULL
-                )
-                """
+        db.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS transcripts (
+                id VARCHAR(36) PRIMARY KEY,
+                room_id VARCHAR(36) REFERENCES rooms(id),
+                speaker_id VARCHAR(36),
+                speaker_name VARCHAR(100) NOT NULL,
+                original_text TEXT NOT NULL,
+                source_lang VARCHAR(10) NOT NULL,
+                confidence {real_type} DEFAULT 1.0,
+                translations_json TEXT NOT NULL,
+                timestamp {real_type} NOT NULL
             )
+            """
+        )
 
-            db.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS session_insights (
-                    room_id VARCHAR(36) PRIMARY KEY REFERENCES rooms(id),
-                    executive_summary TEXT NOT NULL,
-                    action_items_json TEXT NOT NULL,
-                    key_points_json TEXT NOT NULL,
-                    entities_json TEXT NOT NULL,
-                    created_at {real_type} NOT NULL
-                )
-                """
+        db.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS session_insights (
+                room_id VARCHAR(36) PRIMARY KEY REFERENCES rooms(id),
+                executive_summary TEXT NOT NULL,
+                action_items_json TEXT NOT NULL,
+                key_points_json TEXT NOT NULL,
+                entities_json TEXT NOT NULL,
+                created_at {real_type} NOT NULL
             )
+            """
+        )
 
-            # A removal from history belongs to one account, not the shared room.
-            db.execute(
-                f"""CREATE TABLE IF NOT EXISTS room_history_hidden (
-                    room_id VARCHAR(36) REFERENCES rooms(id) ON DELETE CASCADE,
-                    user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
-                    hidden_at {real_type} NOT NULL,
-                    PRIMARY KEY (room_id, user_id)
-                )"""
-            )
+        # A removal from history belongs to one account, not the shared room.
+        db.execute(
+            f"""CREATE TABLE IF NOT EXISTS room_history_hidden (
+                room_id VARCHAR(36) REFERENCES rooms(id) ON DELETE CASCADE,
+                user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
+                hidden_at {real_type} NOT NULL,
+                PRIMARY KEY (room_id, user_id)
+            )"""
+        )
 
-            db.execute(
-                f"""CREATE TABLE IF NOT EXISTS saved_moments (
-                    user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
-                    turn_id VARCHAR(36) REFERENCES transcripts(id) ON DELETE CASCADE,
-                    created_at {real_type} NOT NULL,
-                    PRIMARY KEY (user_id, turn_id)
-                )"""
-            )
-            db.execute(
-                f"""CREATE TABLE IF NOT EXISTS conversation_recaps (
-                    room_id VARCHAR(36) REFERENCES rooms(id) ON DELETE CASCADE,
-                    language VARCHAR(10) NOT NULL,
-                    job_id VARCHAR(36) NOT NULL,
-                    source_hash VARCHAR(64) NOT NULL,
-                    status VARCHAR(20) NOT NULL,
-                    result_json TEXT,
-                    error TEXT,
-                    updated_at {real_type} NOT NULL,
-                    PRIMARY KEY (room_id, language)
-                )"""
-            )
+        db.execute(
+            f"""CREATE TABLE IF NOT EXISTS saved_moments (
+                user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
+                turn_id VARCHAR(36) REFERENCES transcripts(id) ON DELETE CASCADE,
+                created_at {real_type} NOT NULL,
+                PRIMARY KEY (user_id, turn_id)
+            )"""
+        )
+        db.execute(
+            f"""CREATE TABLE IF NOT EXISTS conversation_recaps (
+                room_id VARCHAR(36) REFERENCES rooms(id) ON DELETE CASCADE,
+                language VARCHAR(10) NOT NULL,
+                job_id VARCHAR(36) NOT NULL,
+                source_hash VARCHAR(64) NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                result_json TEXT,
+                error TEXT,
+                updated_at {real_type} NOT NULL,
+                PRIMARY KEY (room_id, language)
+            )"""
+        )
 
-            # Migration: Ensure gender column exists
-            try:
-                if pg:
-                    db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10) DEFAULT 'female'")
-                else:
-                    cols = [row["name"] for row in db.fetchall("PRAGMA table_info(users)")]
-                    if "gender" not in cols:
-                        db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) DEFAULT 'female'")
-            except Exception as e:
-                logger.debug("Migration check notice: %s", e)
+        for name, table, columns in (
+            ("idx_transcripts_room_time", "transcripts", "room_id, timestamp"),
+            ("idx_participants_room_user", "room_participants", "room_id, user_id"),
+            ("idx_participants_user_room", "room_participants", "user_id, room_id"),
+            ("idx_moments_user_time", "saved_moments", "user_id, created_at"),
+        ):
+            db.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({columns})")
 
-            if pg:
-                try:
-                    db.raw_conn.autocommit = False
-                except Exception:
-                    pass
+        # Migration: Ensure gender column exists
+        if pg:
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10) DEFAULT 'female'")
+        else:
+            cols = [row["name"] for row in db.fetchall("PRAGMA table_info(users)")]
+            if "gender" not in cols:
+                db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) DEFAULT 'female'")
 
-            logger.info("Database initialized successfully (engine: %s)", "PostgreSQL" if pg else "SQLite")
+        if pg:
+            db.raw_conn.autocommit = False
+
+        logger.info("Database initialized successfully (engine: %s)", "PostgreSQL" if pg else "SQLite")

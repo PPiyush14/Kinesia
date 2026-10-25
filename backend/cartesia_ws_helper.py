@@ -4,7 +4,7 @@ import base64
 import json
 import logging
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
 import websocket
 
@@ -44,23 +44,25 @@ class CartesiaSyncWS:
         if self._active_ws is not None:
             try:
                 self._active_ws.close()
-            except Exception:
-                pass
+            except Exception as cleanup_error:  # noqa: BLE001 - Keep socket cleanup and future synthesis available.
+                logger.debug("Provider cleanup/probe failed (%s)", type(cleanup_error).__name__)
             finally:
                 self._active_ws = None
 
     def send_tts(self, payload: dict) -> tuple[object | None, bool]:
         self.close()
 
+        ws = None
         try:
             ws = self._create_connection()
             ws.send(json.dumps(payload))
-        except Exception as exc:
-            logger.error("CartesiaSyncWS send_tts failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - Keep socket cleanup and future synthesis available.
+            logger.error("CartesiaSyncWS send_tts failed (%s)", type(exc).__name__)
             try:
-                ws.close()  # type: ignore[name-defined]
-            except Exception:
-                pass
+                if ws is not None:
+                    ws.close()
+            except Exception as cleanup_error:  # noqa: BLE001 - Keep socket cleanup and future synthesis available.
+                logger.debug("Provider socket cleanup failed (%s)", type(cleanup_error).__name__)
             return None, False
 
         self._active_ws = ws
@@ -111,7 +113,7 @@ class CartesiaSyncWS:
         finally:
             try:
                 ws.close()
-            except Exception:
-                pass
+            except Exception as cleanup_error:  # noqa: BLE001 - Keep socket cleanup and future synthesis available.
+                logger.debug("Provider socket cleanup failed (%s)", type(cleanup_error).__name__)
             if ws is self._active_ws:
                 self._active_ws = None

@@ -13,6 +13,7 @@ import time
 import uuid
 from typing import Any
 
+from backend.core.exceptions import InvalidInputError
 from backend.db.auth import hash_password, verify_password
 from backend.db.connection import get_db
 
@@ -33,7 +34,13 @@ def create_room(
     record_session: bool = True,
 ) -> dict[str, Any]:
     """Create a new Kinesia dialogue room."""
-    clean_title = (title or "General Session").strip()
+    if not isinstance(title, str) or len(title) > 200:
+        raise ValueError("Room title must be text of at most 200 characters.")
+    if passcode is not None and (not isinstance(passcode, str) or len(passcode) > 128):
+        raise ValueError("Passcode must be text of at most 128 characters.")
+    if not isinstance(record_session, bool):
+        raise InvalidInputError("record_session must be true or false.")
+    clean_title = title.strip() or "General Session"
     room_id = str(uuid.uuid4())
     room_code = generate_room_code()
     now = time.time()
@@ -105,6 +112,8 @@ def get_room_by_code(room_code: str) -> dict[str, Any] | None:
 
 def verify_room_access(room_code: str, passcode: str | None = None) -> bool:
     """Verify if participant passcode matches room passcode."""
+    if passcode is not None and (not isinstance(passcode, str) or len(passcode) > 128):
+        raise ValueError("Passcode must be text of at most 128 characters.")
     clean_code = room_code.strip().lower()
     with get_db() as db:
         room = db.fetchone("SELECT passcode_hash FROM rooms WHERE room_code = ?", (clean_code,))
@@ -180,6 +189,8 @@ def add_participant(
     user_name: str,
     speaking_lang: str = "en",
     listening_lang: str = "hi",
+    *,
+    active: bool = True,
 ) -> dict[str, Any]:
     """Register participant entering a room, closing any dangling previous sessions."""
     participant_id = str(uuid.uuid4())
@@ -187,18 +198,19 @@ def add_participant(
     with get_db() as db:
         # Close any lingering prior open entry for this user in this room
         db.execute("DELETE FROM room_history_hidden WHERE room_id = ? AND user_id = ?", (room_id, user_id))
-        db.execute(
-            "UPDATE room_participants SET left_at = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
-            (now, room_id, user_id),
-        )
+        if active:
+            db.execute(
+                "UPDATE room_participants SET left_at = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
+                (now, room_id, user_id),
+            )
         db.execute(
             """
             INSERT INTO room_participants (
                 id, room_id, user_id, user_name, joined_at, left_at,
                 speaking_lang, listening_lang, is_mic_muted
-            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, FALSE)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE)
             """,
-            (participant_id, room_id, user_id, user_name, now, speaking_lang, listening_lang),
+            (participant_id, room_id, user_id, user_name, now, None if active else now, speaking_lang, listening_lang),
         )
     return {
         "id": participant_id,
@@ -326,7 +338,7 @@ def get_room_transcripts(room_id: str) -> list[dict[str, Any]]:
     for row in rows:
         try:
             translations = json.loads(row["translations_json"])
-        except Exception:
+        except (ValueError, TypeError):
             translations = {}
         result.append(
             {
@@ -429,15 +441,15 @@ def get_session_insights(room_id: str) -> dict[str, Any] | None:
 
     try:
         action_items = json.loads(row["action_items_json"])
-    except Exception:
+    except (ValueError, TypeError):
         action_items = []
     try:
         key_points = json.loads(row["key_points_json"])
-    except Exception:
+    except (ValueError, TypeError):
         key_points = []
     try:
         entities = json.loads(row["entities_json"])
-    except Exception:
+    except (ValueError, TypeError):
         entities = {}
 
     return {

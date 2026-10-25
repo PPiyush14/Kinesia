@@ -29,7 +29,7 @@ class BIAggregator:
             entities = turn.get("entities")
             if not isinstance(entities, dict):
                 continue
-            for _label, items in entities.items():
+            for items in entities.values():
                 if isinstance(items, list):
                     for item in items:
                         cleaned = str(item).strip()

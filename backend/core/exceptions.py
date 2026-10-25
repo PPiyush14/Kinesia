@@ -12,6 +12,10 @@ class TranslatorError(Exception):
     """Base class for all translator exceptions."""
 
 
+class InvalidInputError(ValueError, TranslatorError):
+    """Expected invalid external input, handled as a client validation error."""
+
+
 class AudioError(TranslatorError):
     """Raised when audio capture or playback fails."""
 

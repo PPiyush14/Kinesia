@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from backend.audio import CapturedAudio
 from backend.config import AppConfig

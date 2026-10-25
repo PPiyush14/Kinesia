@@ -84,7 +84,7 @@ class TranslatorPipeline:
         self.glossary_store = GlossaryStore(config.project_root)
         try:
             self.entity_extractor: EntityExtractor | None = EntityExtractor()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Hand worker/device failures back through result and error callbacks.
             logger.warning("Could not initialize EntityExtractor: %s", exc)
             self.entity_extractor = None
 
@@ -266,7 +266,7 @@ class TranslatorPipeline:
 
                 try:
                     result = self._transcribe_and_translate_detected_turn(detected_turn)
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - Hand worker/device failures back through result and error callbacks.
                     if on_turn_failure is not None:
                         on_turn_failure(
                             TurnProcessingFailure(
@@ -322,7 +322,7 @@ class TranslatorPipeline:
                 )
                 if captured_audio.raw_pcm_s16le and winner_key["value"] == channel_key:
                     captured_results[channel_key] = captured_audio
-            except BaseException as exc:  # pragma: no cover - thread handoff
+            except BaseException as exc:  # pragma: no cover - thread handoff  # noqa: BLE001 - Hand worker/device failures back through result and error callbacks.
                 errors.append((channel_key, exc))
                 winner_event.set()
                 for stop_event in stop_events.values():
@@ -379,7 +379,7 @@ class TranslatorPipeline:
         while not stop_event.is_set():
             speech_started_at = {"value": None}
 
-            def mark_speech_started() -> None:
+            def mark_speech_started(speech_started_at=speech_started_at) -> None:
                 if speech_started_at["value"] is None:
                     speech_started_at["value"] = time.monotonic()
 
@@ -390,7 +390,7 @@ class TranslatorPipeline:
                     on_speech_start=mark_speech_started,
                     stop_event=stop_event,
                 )
-            except BaseException as exc:  # pragma: no cover - thread handoff
+            except BaseException as exc:  # pragma: no cover - thread handoff  # noqa: BLE001 - Hand worker/device failures back through result and error callbacks.
                 if not stop_event.is_set():
                     consecutive_failures += 1
                     retry_delay_seconds = min(5.0, float(consecutive_failures))
@@ -502,7 +502,7 @@ class TranslatorPipeline:
                     live_transcription.transcript,
                     translation,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Hand worker/device failures back through result and error callbacks.
                 logger.warning("Entity extraction failed: %s", exc)
 
         tts_started_at = time.perf_counter()

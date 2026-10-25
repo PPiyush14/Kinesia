@@ -61,6 +61,6 @@ class GroqWhisperClient:
                 return ""
             payload = resp.json()
             return str(payload.get("text", "")).strip()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Report unavailable transcription from the optional fallback.
             logger.error("Groq Whisper request failed: %s", exc)
             return ""

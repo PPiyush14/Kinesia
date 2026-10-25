@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -119,13 +119,10 @@ class AppConfig:
         if self.translation_provider != "soniox" and _is_missing(self.gemma_model):
             missing.append("GEMMA_MODEL")
         if self.tts_provider == "google":
-            if self.google_tts_credentials_path is None:
+            if self.google_tts_credentials_path is None or not self.google_tts_credentials_path.exists():
                 missing.append("GOOGLE_TTS_CREDENTIALS_PATH")
-            elif not self.google_tts_credentials_path.exists():
-                missing.append("GOOGLE_TTS_CREDENTIALS_PATH")
-        elif self.tts_provider == "cartesia":
-            if _is_missing(self.cartesia_api_key):
-                missing.append("CARTESIA_API_KEY")
+        elif self.tts_provider == "cartesia" and _is_missing(self.cartesia_api_key):
+            missing.append("CARTESIA_API_KEY")
 
         if channel_key is None:
             channels = list(self.channels.values())

@@ -168,7 +168,7 @@ class EntityExtractor:
     def _load_model(cls):
         """Load the spaCy model, raising a clear error if not installed."""
         try:
-            import spacy  # noqa: PLC0415
+            import spacy
             return spacy.load(cls._MODEL_NAME)
         except OSError as exc:
             raise EntityExtractionError(

@@ -40,7 +40,7 @@ if __name__ == "__main__":
                           "source_language": arguments.source_language,
                           "duration_ms": round((time.monotonic() - started) * 1000),
                           "source_quotes_validated": True, "synthetic_recap": result}, ensure_ascii=True))
-    except Exception as exc:  # noqa: BLE001 - only sanitized errors, never request headers or provider bodies.
+    except Exception as exc:  # noqa: BLE001 - Report sanitized probe status without credentials.
         print(json.dumps({"ok": False, "error_type": type(exc).__name__,
                           "hint": "Check the separate Groq key, model and free-tier quota."}))
         raise SystemExit(1)

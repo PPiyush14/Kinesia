@@ -1,116 +1,100 @@
-# System Architecture — Kinesia
+# Kinesia architecture
 
-> **Real-Time Bilingual Speech Translation & Conversational Entity Extraction Platform**  
-> *B.Tech Final Year Industry Project · Dept. of AI & ML · Markytics.AI*
+## Current browser product
 
----
-
-## 1. High-Level Architecture
-
-Kinesia provides continuous, bi-directional speech-to-speech translation between two participants while simultaneously running local Named Entity Recognition (NER) and session-level Conversational Intelligence.
+Render runs one Docker web service and PostgreSQL. The service serves the React
+build from `backend/web`, the authenticated API, and the room WebSocket on the
+same origin. With `TRANSLATION_PROVIDER=soniox`, startup selects
+`backend/realtime_server.py`. Provider credentials remain on the server.
 
 ```mermaid
-flowchart TD
-    subgraph AudioCapture["1. Dual-Channel Audio Capture"]
-        MicA["Speaker A Microphone<br/>(Channel 1)"]
-        MicB["Speaker B Microphone<br/>(Channel 2)"]
-    end
-
-    subgraph Phase1["Phase 1 — Live Translation Engine"]
-        SonioxSTT["Soniox Streaming STT (v5)<br/>WebSocket Client + Lang ID<br/>Confidence Scoring"]
-        GemmaLLM["Google Gemma LLM Client<br/>Contextual Bilingual Translation<br/>Glossary Injection"]
-        TTS["Speech Synthesis Engine<br/>Cartesia Sonic-3 / Google Cloud TTS"]
-        Speakers["PortAudio Playback<br/>Channel Peer Routing"]
-    end
-
-    subgraph Phase2["Phase 2 — Conversational Intelligence"]
-        NER["spaCy Multilingual NER<br/>xx_ent_wiki_sm<br/>PER, ORG, LOC, DATE, MONEY"]
-        Summarizer["Session Summarizer<br/>Gemma Executive Summary<br/>Key Points & Action Items"]
-        Aggregator["BI Analytics Aggregator<br/>Entity Timeline & Frequencies<br/>Telemetry Percentiles"]
-    end
-
-    subgraph Storage["Persistent Storage Layer"]
-        ConvStore["SessionConversationStore<br/>Turn Records + STT Confidence<br/>session_conversations/*.json"]
-        GlossaryStore["GlossaryStore<br/>glossary.json"]
-        AudioStore["Audio Vault<br/>turn_*.wav recordings"]
-    end
-
-    subgraph Distribution["Client & Integration Layer"]
-        Dashboard["Web Studio Dashboard<br/>Vanilla JS + CSS Glassmorphism<br/>Chart.js Visualizations"]
-        RestAPI["REST API (/api/v1/)<br/>ThreadingHTTPServer"]
-        SSE["Server-Sent Events (/events)<br/>Low-latency UI Sync"]
-        Webhook["Webhook Dispatcher<br/>Async POST on Session End"]
-    end
-
-    MicA -->|16kHz PCM| SonioxSTT
-    MicB -->|16kHz PCM| SonioxSTT
-    SonioxSTT -->|Transcript + Confidence| GemmaLLM
-    GemmaLLM -->|Translation Text| TTS
-    TTS -->|Synthesized Audio WAV| Speakers
-    
-    SonioxSTT -.->|Turn Text| NER
-    GemmaLLM -.->|Translation| NER
-    NER -->|Surfaced Entities| ConvStore
-    GemmaLLM --> ConvStore
-    ConvStore --> Summarizer
-    Summarizer --> Aggregator
-    Summarizer --> Webhook
-    
-    ConvStore --> RestAPI
-    Aggregator --> RestAPI
-    RestAPI --> Dashboard
-    SSE --> Dashboard
-    GlossaryStore -.->|Injected Prompts| GemmaLLM
+flowchart LR
+    Mic[Browser microphone] --> Worklet[AudioWorklet: PCM16 at 16 kHz]
+    Worklet --> WS[Authenticated room WebSocket]
+    WS --> Soniox[Soniox STT and native translation]
+    Soniox --> Captions[Partial and final captions]
+    Soniox --> Stable[Stable translated clauses]
+    Stable --> Cartesia[Cartesia streaming speech]
+    Cartesia --> Fanout[PCM fan-out by listening language]
+    Fanout --> Player[Browser scheduled audio playback]
+    Soniox --> Turns[Canonical transcript turns]
+    Turns --> DB[(PostgreSQL)]
+    DB --> History[Participant history and private saved moments]
+    DB --> Recap[Explicit post-conversation Groq recap]
+    Recap --> Evidence[Server-resolved source quotes and references]
 ```
 
----
+The WebSocket starts with an authentication JSON message, then accepts binary
+mono PCM16 and JSON configuration/activity controls. Soniox opens one route per
+speaker and required listening language; listeners sharing a language share
+the synthesized output. Partial hypotheses update captions. Only stable text
+enters TTS. Clauses within one utterance share a Cartesia context, while each
+transport stream has its own ID and sequence numbers.
 
-## 2. Core Subsystems
+`backend/realtime_rooms.py` owns provider routes, output queues, listeners,
+interruption state, and bounded shutdown. `backend/rooms/coordinator.py` owns
+membership, persisted host permissions, canonical turn merging, and lifecycle
+events. A primary recognition route supplies the canonical source transcript;
+parallel routes contribute translations aligned by audio time and capture epoch.
+Identical words alone never identify a duplicate utterance.
 
-### 2.1 Audio Ingestion & Playback (`pi_translator/audio.py`)
-- **PortAudio + sounddevice**: Captures single-channel 16-bit PCM at 16,000 Hz.
-- **Voice Activity Detection (VAD)**: Energy-based silence detection with configurable thresholds (`VOICE_ACTIVITY_THRESHOLD`, `VOICE_SILENCE_SECONDS`).
-- **Low-Latency Streaming**: Utterances are chunked (100 ms) and pushed to Soniox over WebSockets.
+Muting stops outgoing capture without resetting incoming playback. Retiring
+routes flush recognition and drain queued synthesis within a deadline. A
+listening-language change resets incoming audio to avoid playing the old
+language. Sustained voice activity plus fresh recognized text can interrupt
+stale speech; short acknowledgements do not automatically take the floor.
+These are conservative heuristics, not perfect intent recognition.
 
-### 2.2 Streaming STT & Language Identification (`pi_translator/soniox_client.py`)
-- **Engine**: Soniox Real-Time WebSocket API (`stt-rt-v5`).
-- **Confidence Scoring**: Computes turn confidence as a composite of token language consistency and individual token acoustic probabilities:
-  $$\text{Confidence} = 0.70 \times \bar{c}_{\text{tokens}} + 0.30 \times \frac{w_{\text{dominant}}}{\sum w_i}$$
-- **Zero Fabrication**: Confidences below 0.70 trigger a visual `⚠ Low Confidence` badge on the dashboard.
+## Persistence and privacy
 
-### 2.3 Translation & Glossary Enforcement (`pi_translator/translation/`, `gemma_client.py`)
-- **Engine**: Google Gemma LLM via high-throughput OpenAI-compatible completions endpoint.
-- **Glossary Injection**: Custom terms in `glossary.json` are detected in source utterances and injected into the Gemma system prompt:
-  > *"Preserve these terms exactly as-is: TechCorp, Project Alpha, Dr. Sharma."*
-- **Temperature**: $T=0.0$ for deterministic, faithful translation.
+PostgreSQL stores accounts, room ownership/membership, recorded transcripts,
+legacy extractive insights, private saved moments, and AI recap status/results.
+SQLite is the isolated local-test fallback and enforces foreign keys too.
+Startup applies additive schema/index initialization; initialization failures
+must be visible rather than silently ignored.
 
-### 2.4 Text-to-Speech Synthesis (`pi_translator/tts/`, `cartesia_client.py`, `google_tts_client.py`)
-- **Cartesia Sonic-3**: Ultra-low latency voice synthesis (sub-350 ms).
-- **Google Cloud TTS**: High-fidelity neural voice synthesis for Indian regional languages (Hindi, Telugu, Tamil, Marathi, etc.).
+Leaving does not transfer host ownership. A returning creator can end the room.
+Passcode verification grants membership without claiming the user is online;
+the live coordinator supplies presence. Replacing a tab changes subscription
+ownership. Account deletion revokes active guest connections as well as hosted
+rooms after the database transaction succeeds.
 
-### 2.5 Named Entity Recognition (`pi_translator/nlp/entity_extractor.py`)
-- **Engine**: spaCy multilingual entity recognition (`xx_ent_wiki_sm`).
-- **Bidirectional Verification**: Evaluates both the source transcript and target translation to prevent entity loss across code-switched phrases.
-- **Surfaced Entities**: `PERSON`, `ORG`, `LOC`, `GPE`, `DATE`, `TIME`, `MONEY`, `PRODUCT`.
+Personal history removal hides a conversation for that account; it does not
+delete another participant's history or the shared source. Host-only transcript
+clearing removes derived recaps/bookmarks and blocks delayed STT from restoring
+pre-clear speech. Saving resumes with a new phrase. Conversations created with
+recording disabled have no persisted transcript, bookmarks, or AI recaps.
 
-### 2.6 Session Intelligence & Summarization (`pi_translator/nlp/summarizer.py`)
-- **Trigger**: Automatic on session end or manual on-demand via `POST /api/v1/insights/{id}/summarize`.
-- **Outputs**:
-  - Executive summary (2-4 concise sentences)
-  - Key discussion points
-  - Action items (strict empty list `[]` if no tasks were discussed)
-  - Entity table aggregated across all turns.
+## Recaps
 
----
+Groq is independent of live speech and runs only after an explicit request for
+an ended, recorded conversation. The backend processes long inputs in bounded
+batches, validates structured output, and resolves provider-selected passage
+references to actual turn IDs and exact original quotes. Invalid references
+receive one bounded repair attempt, then an explicit failure. Grounded citations
+do not guarantee that the model interpreted every statement correctly.
 
-## 3. Data Flow & Persistence
+Recap jobs run in a separate worker with bounded queue/deadline/rate-limit
+handling and persisted status. A restart makes interrupted jobs retryable.
+No generated success is substituted for a missing key or a failed provider.
 
-All session artifacts are persisted under `session_conversations/`:
-```
-session_conversations/
-├── <session_id>.json            # Complete turn log with latency, confidence, and entities
-├── <session_id>_summary.json    # NLP summary, key points, action items
-└── <session_id>_audio/          # (Opt-in) 16kHz WAV recordings of turns
-    ├── turn_000_ch1.wav
-    └── turn_001_ch2.wav
-```
+## Compatibility entry points
+
+The repository retains the workstation/CLI pipeline (`backend/cli.py`,
+`backend/pipeline.py`, `backend/audio.py`), optional provider adapters, glossary
+and evaluation tools, and REST/SSE compatibility routes in
+`backend/dashboard_server.py`. Their host audio devices and local
+`session_conversations/` artifacts are separate from browser-room persistence.
+They are not the Render microphone transport. Gemma/Google/Edge adapters do not
+participate in the configured Soniox/Cartesia browser path.
+
+## Operational limits and verification
+
+Live rooms are process-local: use one worker and one instance. Admission currently
+allows at most eight participants and the configured listening-language limit
+(default four), checked atomically. These are guardrails, not a load-test result.
+Bounded queues may skip stale audio and report overload; captions/transcripts
+remain available. No fixed end-to-end latency or unlimited scale is promised.
+
+See [Render deployment and call tests](RENDER_DEPLOYMENT.md),
+[API reference](api.md), and [audit evidence](KINESIA_AUDIT_FIXES.md).

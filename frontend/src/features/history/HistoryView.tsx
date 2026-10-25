@@ -509,7 +509,7 @@ export function HistoryView({
             <p className="mt-3 text-sm leading-relaxed text-ink-muted">
               {modal === 'history'
                 ? 'This removes your history entries only. Other participants keep their copies, and active conversations continue. Your Saved Moments remain available. Rejoining a room adds it back to your history.'
-                : 'This removes the transcript, recaps and saved moments for every participant. New speech can still be saved while the room is active.'}
+                : 'This removes the transcript, recaps and saved moments for every participant. In an active room, saving resumes with the next new phrase.'}
             </p>
             <div className="mt-6 flex justify-end gap-2">
               <Button

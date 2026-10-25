@@ -102,7 +102,7 @@ async def check(target, streaming=False):
         print(json.dumps({"provider": "cartesia", "language": target, "ok": True,
                           "audio_bytes": sum(map(len, translated_audio))}), flush=True)
         return 0
-    except Exception as exc:  # noqa: BLE001 - report sanitized status only.
+    except Exception as exc:  # noqa: BLE001 - Report sanitized probe status without credentials.
         # Do not print provider response bodies, URLs or credential-bearing headers.
         print(json.dumps({"ok": False, "error_type": type(exc).__name__,
                           "hint": "Check provider keys, credits, model and voice availability."}), flush=True)

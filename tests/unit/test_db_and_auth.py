@@ -2,27 +2,31 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
-from backend.db.auth import authenticate_user, create_token, register_user, verify_token
-from backend.db.auth import _get_signing_key
-from backend.db.connection import get_db, init_db
+from backend.db.auth import (
+    _get_signing_key,
+    authenticate_user,
+    create_token,
+    register_user,
+    verify_token,
+)
+from backend.db.connection import init_db
 from backend.db.rooms import (
     add_participant,
     add_transcript,
+    clear_room_transcripts,
     create_room,
     end_room,
     get_room_by_code,
     get_room_transcripts,
     get_session_insights,
+    hide_all_room_history,
+    hide_room_from_history,
     list_active_participants,
     list_user_rooms,
-    hide_room_from_history,
-    hide_all_room_history,
-    clear_room_transcripts,
     save_session_insights,
     verify_room_access,
 )
@@ -82,6 +86,11 @@ def test_missing_or_empty_jwt_secret_uses_random_process_key(monkeypatch):
     assert _get_signing_key() == key
     monkeypatch.setenv("JWT_SECRET", "configured-test-signing-key-32-characters")
     assert _get_signing_key() != key
+    assert verify_token(token) is None
+
+
+@pytest.mark.parametrize("token", [None, b"bytes", "a.b.☃", "a.b." + "x" * 9000])
+def test_malformed_bearer_tokens_are_rejected_without_raising(token):
     assert verify_token(token) is None
 
 
@@ -152,7 +161,7 @@ def test_room_lifecycle_and_access_control() -> None:
 
 def test_history_metadata_keeps_creator_identity_after_leaving():
     host = register_user("owner", "owner@example.com", "pass123")
-    room = create_room("Persistent host", host["id"], passcode="room-pass")
+    create_room("Persistent host", host["id"], passcode="room-pass")
     entry = list_user_rooms(host["id"])[0]
     assert entry["host_id"] == host["id"]
     assert entry["is_host"] is True

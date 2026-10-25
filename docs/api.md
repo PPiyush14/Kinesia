@@ -4,7 +4,44 @@
 > **Base Path:** `/api/v1/`  
 > **Data Transport:** JSON over HTTP/1.1 · Server-Sent Events (SSE)
 
-All REST API responses adhere to a standardized envelope format:
+## Current browser API
+
+The deployed browser product uses `/ws/rooms/{room_code}` for authenticated
+microphone PCM, captions, streaming translated audio, and room events. REST
+routes manage accounts, rooms, transcript history, recaps, and saved moments.
+See the [current route table](../README.md#api-overview) and the TypeScript
+client in `frontend/src/services/api.ts` for request/response types.
+
+- `GET/POST /api/v1/rooms/{code}/recap`: read/request a recap. GET accepts
+  `output_language`; POST accepts `{ "language": "en" }`. Generation requires
+  an ended, recorded room and membership. Pending, ready, and failed states are
+  explicit; generated citations resolve to real transcript passages.
+- `GET /api/v1/moments` and `GET/POST /api/v1/rooms/{code}/moments`: private
+  bookmarks; POST accepts `{ "turn_id": "..." }`. DELETE the turn-ID suffix to
+  remove the caller's bookmark.
+- `DELETE /api/v1/rooms/{code}` and `/api/v1/rooms/clear-all`: personal history
+  removal. `DELETE /api/v1/rooms/{code}/transcripts` clears shared source and
+  derived data and requires the host. These operations have different scopes.
+- `POST /api/v1/rooms/{code}/end`: host-only and retryable after the room has
+  ended. Extractive session notes are separate from an explicitly generated
+  AI recap.
+
+API calls use `Authorization: Bearer <token>`. The WebSocket authenticates in
+its first JSON message, rather than putting credentials in the URL. Current
+WebSocket controls and binary framing are implemented in
+`backend/realtime_server.py`, `frontend/src/hooks/useRealtimeRoom.ts`, and
+`frontend/src/lib/realtimeAudio.ts`.
+
+Most REST routes use the envelope below. ASGI authentication/validation errors
+may instead return `{ "detail": "..." }`; the browser client handles both.
+Health configuration flags indicate presence of settings, not provider credits
+or successful live synthesis. See [deployment checks](RENDER_DEPLOYMENT.md).
+
+## REST/SSE compatibility reference
+
+The workstation hardware/channel routes below are retained for compatibility.
+They do not describe the current browser microphone transport. Their REST
+responses use this envelope:
 
 ```json
 {

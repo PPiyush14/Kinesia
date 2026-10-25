@@ -225,7 +225,7 @@ class SessionConversationStore:
                 try:
                     meta = self.read_summary(session_id)
                     sessions.append(meta)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Keep unreadable files from hiding other saved sessions.
                     logger.debug("Failed to read session %s: %s", session_id, exc)
         sessions.sort(key=lambda s: s.get("started_at") or 0.0, reverse=True)
         return sessions

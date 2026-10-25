@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import threading
 import time
 import wave
@@ -9,10 +10,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+
 try:
     import sounddevice as sd
 except ImportError:
     sd = None
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -214,9 +219,7 @@ class MicrophoneRecorder:
 
             speech_started_at = state["speech_started_at"] or now
             last_voice_at = state["last_voice_at"] or now
-            if now - speech_started_at >= self.max_record_seconds:
-                finish_speech()
-            elif now - last_voice_at >= self.silence_seconds:
+            if now - speech_started_at >= self.max_record_seconds or now - last_voice_at >= self.silence_seconds:
                 finish_speech()
 
         with sd.RawInputStream(
@@ -365,7 +368,7 @@ class MicrophoneRecorder:
 
         default_rate = info.get("default_samplerate")
         if default_rate:
-            rounded_default = int(round(float(default_rate)))
+            rounded_default = round(float(default_rate))
             if rounded_default not in candidate_rates:
                 candidate_rates.append(rounded_default)
 
@@ -382,7 +385,7 @@ class MicrophoneRecorder:
                     samplerate=candidate_rate,
                     dtype="int16",
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Continue hardware format probing after a driver failure.
                 last_error = exc
                 continue
             return candidate_rate
@@ -414,8 +417,8 @@ class MicrophoneRecorder:
             else:
                 sd.query_devices(selector, kind=kind)
             return selector
-        except Exception:
-            pass
+        except Exception as cleanup_error:  # noqa: BLE001 - Continue hardware format probing after a driver failure.
+            logger.debug("Audio device probe failed (%s)", type(cleanup_error).__name__)
 
         devices = MicrophoneRecorder.list_audio_devices()
         normalized_selector = MicrophoneRecorder._normalize_device_selector(selector)
@@ -473,7 +476,7 @@ class MicrophoneRecorder:
 
         default_rate = info.get("default_samplerate")
         if default_rate:
-            candidate_rates.append(int(round(float(default_rate))))
+            candidate_rates.append(round(float(default_rate)))
 
         for rate in (48000, 44100, 32000, 24000, 22050, 16000):
             if rate not in candidate_rates:
@@ -489,7 +492,8 @@ class MicrophoneRecorder:
                     samplerate=candidate_rate,
                     dtype=dtype_name,
                 )
-            except Exception:
+            except Exception as cleanup_error:  # noqa: BLE001 - Continue hardware format probing after a driver failure.
+                logger.debug("Audio device probe failed (%s)", type(cleanup_error).__name__)
                 continue
             return candidate_rate
         return None
@@ -510,7 +514,7 @@ class MicrophoneRecorder:
         source_length = audio_2d.shape[0]
         target_length = max(
             1,
-            int(round(source_length * (to_sample_rate / float(from_sample_rate)))),
+            round(source_length * (to_sample_rate / float(from_sample_rate))),
         )
         source_positions = np.arange(source_length, dtype=np.float32)
         target_positions = np.linspace(

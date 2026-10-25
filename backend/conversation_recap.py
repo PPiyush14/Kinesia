@@ -311,7 +311,7 @@ class RecapService:
                 finish_recap(job_id, "failed", error="The transcript changed. Please generate a new recap.")
         except RecapError as exc:
             finish_recap(job_id, "failed", error=str(exc))
-        except Exception:  # noqa: BLE001 - never persist provider exceptions or credential-bearing responses.
+        except Exception:  # noqa: BLE001 - Persist a sanitized failure without provider bodies or keys.
             finish_recap(job_id, "failed", error="The recap could not be completed. Please retry.")
         finally:
             self.generator.source_valid = lambda: True

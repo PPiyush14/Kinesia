@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Sidebar } from '@/components/navigation/Sidebar';
 import { AppHeader } from '@/components/navigation/AppHeader';
@@ -33,9 +33,14 @@ export default function App() {
   const [speakingLang, setSpeakingLang] = useState('en');
   const [listeningLang, setListeningLang] = useState('hi');
   const [insights, setInsights] = useState<SessionInsights | null>(null);
-  const [toast, setToast] = useState<{ message: string; tone: ToastTone } | null>(null);
+  const [toast, setToast] = useState<{
+    message: string;
+    tone: ToastTone;
+  } | null>(null);
+  const navigationRevision = useRef(0);
 
   const setView = useCallback((nextView: ViewState) => {
+    navigationRevision.current++;
     setViewState(nextView);
     if (nextView !== 'auth') {
       localStorage.setItem('kinesia_view', nextView);
@@ -52,38 +57,64 @@ export default function App() {
     }
   });
 
-  const showToast = useCallback((message: string, tone: ToastTone = 'success') => {
-    setToast({ message, tone });
-    window.setTimeout(() => setToast(null), 3200);
-  }, []);
+  const pendingRoomRef = useRef(pendingRoomCode);
+  pendingRoomRef.current = pendingRoomCode;
 
-  const joinPendingRoom = useCallback(async (code: string) => {
-    try {
-      const target = await roomService.getRoom(code);
-      if (target) {
-        if (target.passcode_required) {
-          showToast(`Passcode required for room ${code}`, 'info');
-          setView('workspace');
+  const showToast = useCallback(
+    (message: string, tone: ToastTone = 'success') => {
+      setToast({ message, tone });
+      window.setTimeout(() => setToast(null), 3200);
+    },
+    [],
+  );
+
+  const joinPendingRoom = useCallback(
+    async (code: string) => {
+      const revision = navigationRevision.current;
+      try {
+        const target = await roomService.getRoom(code);
+        if (revision !== navigationRevision.current) return;
+        if (target) {
+          if (target.passcode_required) {
+            showToast(`Passcode required for room ${code}`, 'info');
+            setView('workspace');
+            return;
+          }
+          setRoom(target);
+          localStorage.setItem('kinesia_room_code', target.room_code);
+          setInsights(null);
+          setView(
+            target.is_active === false || target.status === 'ended'
+              ? 'history'
+              : 'lobby',
+          );
+          showToast(`Opened "${target.title}"`);
+          setPendingRoomCode(null);
           return;
         }
-        setRoom(target);
-        setInsights(null);
-        setView('lobby');
-        showToast(`Joined dialogue "${target.title}"`);
-        setPendingRoomCode(null);
-        return;
+      } catch (err) {
+        if (revision !== navigationRevision.current) return;
+        showToast(
+          err instanceof Error ? err.message : 'Room not found',
+          'error',
+        );
       }
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Room not found', 'error');
-    }
-    setView('welcome');
-  }, [showToast, setView]);
+      setView('welcome');
+    },
+    [showToast, setView],
+  );
 
   // Bootstrap session from stored token on refresh
   useEffect(() => {
     let cancelled = false;
+    const revision = navigationRevision.current;
     const existing = getStoredToken();
-    if (!existing || existing === 'undefined' || existing === 'null' || existing.trim() === '') {
+    if (
+      !existing ||
+      existing === 'undefined' ||
+      existing === 'null' ||
+      existing.trim() === ''
+    ) {
       removeStoredToken();
       setToken(null);
       setBootstrapping(false);
@@ -93,20 +124,27 @@ export default function App() {
     authService
       .getMe()
       .then((u) => {
-        if (cancelled) return;
+        if (cancelled || revision !== navigationRevision.current) return;
         setUser(u);
         if (u.default_input_lang) setSpeakingLang(u.default_input_lang);
         if (u.default_output_lang) setListeningLang(u.default_output_lang);
-        if (pendingRoomCode) {
-          void joinPendingRoom(pendingRoomCode);
+        if (pendingRoomRef.current) {
+          setView('welcome');
+          void joinPendingRoom(pendingRoomRef.current);
         } else {
-          const savedView = localStorage.getItem('kinesia_view') as ViewState | null;
+          const savedView = localStorage.getItem(
+            'kinesia_view',
+          ) as ViewState | null;
           const savedRoomCode = localStorage.getItem('kinesia_room_code');
-          if (savedRoomCode && (savedView === 'lobby' || savedView === 'dialogue')) {
+          if (
+            savedRoomCode &&
+            (savedView === 'lobby' || savedView === 'dialogue')
+          ) {
             roomService
               .getRoom(savedRoomCode)
               .then((r) => {
-                if (cancelled) return;
+                if (cancelled || revision !== navigationRevision.current)
+                  return;
                 if (r && r.is_active) {
                   setRoom(r);
                   setView(savedView);
@@ -116,11 +154,15 @@ export default function App() {
                 }
               })
               .catch(() => {
-                if (cancelled) return;
+                if (cancelled || revision !== navigationRevision.current)
+                  return;
                 localStorage.removeItem('kinesia_room_code');
                 setView('welcome');
               });
-          } else if (savedView && ['welcome', 'workspace', 'history', 'profile'].includes(savedView)) {
+          } else if (
+            savedView &&
+            ['welcome', 'workspace', 'history', 'profile'].includes(savedView)
+          ) {
             setView(savedView);
           } else {
             setView('welcome');
@@ -128,18 +170,24 @@ export default function App() {
         }
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled || revision !== navigationRevision.current) return;
         if (err instanceof ApiError && [401, 403].includes(err.status)) {
           removeStoredToken();
           setToken(null);
           setView('auth');
         } else {
-          setRestoreError('The backend is waking up or temporarily unavailable. Your sign-in is saved.');
+          setRestoreError(
+            'The backend is waking up or temporarily unavailable. Your sign-in is saved.',
+          );
         }
       })
-      .finally(() => { if (!cancelled) setBootstrapping(false); });
-    return () => { cancelled = true; };
-  }, [joinPendingRoom, pendingRoomCode, setView, restoreAttempt]);
+      .finally(() => {
+        if (!cancelled) setBootstrapping(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [joinPendingRoom, setView, restoreAttempt]);
 
   const handleAuthenticated = (u: User, t: string) => {
     setStoredToken(t);
@@ -148,6 +196,7 @@ export default function App() {
     if (u.default_input_lang) setSpeakingLang(u.default_input_lang);
     if (u.default_output_lang) setListeningLang(u.default_output_lang);
     if (pendingRoomCode) {
+      setView('welcome');
       void joinPendingRoom(pendingRoomCode);
     } else {
       setView('welcome');
@@ -169,20 +218,25 @@ export default function App() {
     setRoom(r);
     localStorage.setItem('kinesia_room_code', r.room_code);
     setInsights(null);
-    setView(r.is_active === false || r.status === 'ended' ? 'history' : 'lobby');
+    setView(
+      r.is_active === false || r.status === 'ended' ? 'history' : 'lobby',
+    );
   };
 
   const handleUserUpdated = (updatedUser: User) => {
     setUser(updatedUser);
-    if (updatedUser.default_input_lang) setSpeakingLang(updatedUser.default_input_lang);
-    if (updatedUser.default_output_lang) setListeningLang(updatedUser.default_output_lang);
+    if (updatedUser.default_input_lang)
+      setSpeakingLang(updatedUser.default_input_lang);
+    if (updatedUser.default_output_lang)
+      setListeningLang(updatedUser.default_output_lang);
   };
 
   const copyInviteLink = () => {
     if (!room) return;
     const url = `${window.location.origin}/?join=${encodeURIComponent(room.room_code)}`;
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(url)
+      navigator.clipboard
+        .writeText(url)
         .then(() => showToast(`Invite link copied (${room.room_code})`))
         .catch(() => fallbackCopy(url));
     } else {
@@ -212,7 +266,9 @@ export default function App() {
       <div className="min-h-screen flex items-center justify-center bg-canvas">
         <div className="flex flex-col items-center gap-3">
           <div className="h-8 w-8 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-          <p className="text-xs text-ink-muted tracking-wide">Loading Kinesia...</p>
+          <p className="text-xs text-ink-muted tracking-wide">
+            Loading Kinesia...
+          </p>
         </div>
       </div>
     );
@@ -223,11 +279,16 @@ export default function App() {
       <main className="min-h-screen flex items-center justify-center bg-canvas text-ink-primary p-6">
         <div className="max-w-md text-center space-y-5">
           <p role="alert">{restoreError}</p>
-          <button className="rounded-xl bg-accent px-5 py-3 text-canvas font-medium" onClick={() => {
-            setRestoreError(null);
-            setBootstrapping(true);
-            setRestoreAttempt((attempt) => attempt + 1);
-          }}>Retry connection</button>
+          <button
+            className="rounded-xl bg-accent px-5 py-3 text-canvas font-medium"
+            onClick={() => {
+              setRestoreError(null);
+              setBootstrapping(true);
+              setRestoreAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Retry connection
+          </button>
         </div>
       </main>
     );

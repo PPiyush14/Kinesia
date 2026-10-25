@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
-from backend.config import AppConfig, ChannelConfig
-from backend.config import load_config
+from backend.config import AppConfig, load_config
 
 
 def test_channel_resolution(sample_config: AppConfig) -> None:

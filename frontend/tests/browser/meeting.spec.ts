@@ -99,6 +99,61 @@ async function meeting(page: Page, initialView = 'dialogue', historyRooms = [roo
   };
 }
 
+test('create and passcode join forms have accessible controls and preserve recording choices', async ({ page }) => {
+  const connection = await meeting(page, 'welcome');
+  await page.getByRole('button', { name: 'Start a conversation', exact: true }).click();
+  await page.getByLabel('Session title', { exact: true }).fill('Private chat');
+  await page.getByLabel('Passcode (optional)', { exact: true }).fill('private-code');
+  await page.getByRole('checkbox').uncheck();
+  const request = page.waitForRequest((entry) => entry.method() === 'POST' && entry.url().endsWith('/api/v1/rooms'));
+  await page.getByRole('button', { name: /Create/ }).click();
+  expect((await request).postDataJSON()).toEqual({ title: 'Private chat', passcode: 'private-code', record_session: false });
+  await expect(page.getByRole('button', { name: 'Enter Conversation', exact: true })).toBeVisible();
+  expect(connection.errors).toEqual([]);
+});
+
+test('late profile refresh does not overwrite preferences being edited', async ({ page }) => {
+  const connection = await meeting(page, 'welcome');
+  let release!: () => void;
+  let requested = false;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/v1/auth/me', async (route) => {
+    requested = true;
+    await pending;
+    await route.fulfill({ json: { data: user } });
+  });
+  await page.getByRole('button', { name: 'Profile & Audio', exact: true }).click();
+  await expect.poll(() => requested).toBe(true);
+  await page.getByLabel('Display Name', { exact: true }).fill('My new display name');
+  const response = page.waitForResponse((entry) => entry.url().endsWith('/auth/me'));
+  release();
+  await (await response).finished();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.getByLabel('Display Name', { exact: true })).toHaveValue('My new display name');
+  expect(connection.errors).toEqual([]);
+});
+
+test('a delayed history response cannot restore a cleared transcript', async ({ page }) => {
+  const connection = await meeting(page);
+  let release!: () => void;
+  let requested = false;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/v1/rooms/*/transcripts', async (route) => {
+    requested = true;
+    await pending;
+    await route.fulfill({ json: { data: [{ id: 'old-private-text', speaker_name: 'Guest', original_text: 'This text was cleared.', source_lang: 'en', translations: {} }] } });
+  });
+  await page.reload();
+  await expect.poll(() => requested).toBe(true);
+  connection.send('transcripts_cleared', {});
+  const response = page.waitForResponse((entry) => entry.url().endsWith('/transcripts'));
+  release();
+  await (await response).finished();
+  await page.getByRole('button', { name: /Transcript/ }).click();
+  await expect(page.getByText('This text was cleared.', { exact: true })).toHaveCount(0);
+  expect(connection.errors).toEqual([]);
+});
+
 test('meeting renders captions, deduplicates revised turns, and exports a transcript', async ({ page }) => {
   const connection = await meeting(page);
   await expect(page.getByLabel('Speaking language')).toHaveValue('en');
@@ -378,6 +433,16 @@ test('the new home opens an ended conversation as a review rather than a live ca
   await page.getByRole('heading', { name: room.title, exact: true }).click();
   await expect(page.getByRole('tab', { name: 'Recap', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Generate AI recap' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Enter Conversation', exact: true })).toHaveCount(0);
+  expect(connection.errors).toEqual([]);
+});
+
+test('an invite to an ended conversation opens its review instead of a dead lobby', async ({ page }) => {
+  const ended = { ...room, is_active: false, status: 'ended' };
+  const connection = await meeting(page, 'welcome', [ended]);
+  await page.route('**/api/v1/rooms/' + room.room_code, (route) => route.fulfill({ json: { data: ended } }));
+  await page.goto('/?join=' + room.room_code);
+  await expect(page.getByRole('tab', { name: 'Recap', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter Conversation', exact: true })).toHaveCount(0);
   expect(connection.errors).toEqual([]);
 });

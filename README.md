@@ -29,7 +29,7 @@ kinesia/
 │   ├── dashboard_server.py   # HTTP + SSE
 │   ├── soniox / cartesia / gemma / TTS clients
 ├── tests/  docs/  evaluation/
-├── requirements.txt  pyproject.toml  run_translator.py
+├── requirements.txt  pyproject.toml  run_kinesia.py
 ├── package.json  .env.example  README.md
 ```
 

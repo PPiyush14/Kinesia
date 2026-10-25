@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from http.server import ThreadingHTTPServer
 import threading
+from http.server import ThreadingHTTPServer
+from unittest.mock import MagicMock, patch
 from urllib import request
 from urllib.error import HTTPError
-from unittest.mock import patch, MagicMock
 
 import pytest
 

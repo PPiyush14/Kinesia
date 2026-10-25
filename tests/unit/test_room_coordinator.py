@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from backend.config import AppConfig
-from backend.db.auth import register_user
-from backend.db.connection import init_db
-from backend.db.rooms import create_room
-from backend.rooms.coordinator import RoomCoordinator
-from backend.db.rooms import get_room_transcripts, list_active_participants
-from backend.soniox_client import SonioxTranscriptionResult
-from backend.realtime_providers import SpeechSegment
 from backend.dashboard_server import DashboardRequestHandler
-from backend.db.auth import create_token
-from types import SimpleNamespace
+from backend.db.auth import create_token, register_user
+from backend.db.connection import init_db
+from backend.db.rooms import create_room, get_room_transcripts, list_active_participants
+from backend.realtime_providers import SpeechSegment
+from backend.rooms.coordinator import RoomCoordinator
+from backend.soniox_client import SonioxTranscriptionResult
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +42,7 @@ def test_room_coordinator_fanout_translation(sample_config: AppConfig) -> None:
     room_code = room_record["room_code"]
 
     # Both join
-    room_sess, queue_a = coordinator.join_room(room_code, user_a, speaking_lang="en", listening_lang="en")
+    room_sess, _queue_a = coordinator.join_room(room_code, user_a, speaking_lang="en", listening_lang="en")
     _, queue_b = coordinator.join_room(room_code, user_b, speaking_lang="mr", listening_lang="mr")
 
     assert len(room_sess.participants) == 2
@@ -155,7 +153,7 @@ def test_unrecorded_turn_ids_are_unique_even_in_same_millisecond(room_pipeline):
 
 
 def test_old_sse_cleanup_cannot_remove_new_subscription(room_pipeline):
-    coordinator, room, a, _, qa, qb = room_pipeline
+    coordinator, room, a, _, qa, _qb = room_pipeline
     coordinator.update_participant_status(room.room_code, a["id"], speaking_lang="mr", listening_lang="te", is_muted=True)
     _, replacement = coordinator.join_room(room.room_code, a, "en", "hi")
     coordinator.leave_room(room.room_code, a["id"], event_queue=qa)
@@ -296,9 +294,8 @@ def test_failed_translation_never_speaks_source_text_in_target_voice(room_pipeli
 
 
 def test_undecodable_container_is_never_mislabeled_as_raw_pcm():
-    with patch.dict("sys.modules", {"pydub": None}):
-        with pytest.raises(ValueError, match="Unable to decode"):
-            RoomCoordinator._extract_pcm16le(b"not-a-wav", "audio/wav")
+    with patch.dict("sys.modules", {"pydub": None}), pytest.raises(ValueError, match="Unable to decode"):
+        RoomCoordinator._extract_pcm16le(b"not-a-wav", "audio/wav")
     with pytest.raises(ValueError, match="complete samples"):
         RoomCoordinator._extract_pcm16le(b"odd", "audio/pcm")
 
@@ -320,3 +317,29 @@ def test_parallel_stream_languages_merge_by_time_without_removing_repeated_speec
     events = turns(qb)
     assert [event["revision"] for event in events] == [1, 2, 1]
     assert "mr" not in events[0]["translations"]  # Earlier events retain their own snapshot.
+
+
+def test_pending_speech_cannot_restore_a_cleared_transcript(room_pipeline):
+    coordinator, room, speaker, _, _, _ = room_pipeline
+    room.speaker_audio_positions[speaker["id"]] = 1000
+    coordinator.clear_transcripts(room.room_code, speaker["id"])
+    coordinator.record_stream_segment(room.room_code, speaker["id"], "Speaker", SpeechSegment(
+        "old-pending", "These words were cleared.", "These words were cleared.", "en", "en", 0, 1100, 0.9))
+    assert get_room_transcripts(room.room_id) == []
+    coordinator.record_stream_segment(room.room_code, speaker["id"], "Speaker", SpeechSegment(
+        "new-speech", "This is new speech.", "This is new speech.", "en", "en", 1200, 1700, 0.9))
+    assert [turn["original_text"] for turn in get_room_transcripts(room.room_id)] == ["This is new speech."]
+
+
+def test_parallel_translations_cannot_replace_the_primary_source_transcript(room_pipeline):
+    coordinator, room, speaker, _, _, _ = room_pipeline
+    coordinator.record_stream_segment(room.room_code, speaker["id"], "Speaker", SpeechSegment(
+        "secondary", "Meet at five.", "पाँच बजे मिलो।", "en", "hi", 0, 500, 0.8))
+    coordinator.record_stream_segment(room.room_code, speaker["id"], "Speaker", SpeechSegment(
+        "primary", "Meet at six.", "Meet at six.", "en", "en", 0, 550, 0.95), primary=True)
+    coordinator.record_stream_segment(room.room_code, speaker["id"], "Speaker", SpeechSegment(
+        "another", "Meet at five.", "पाच वाजता भेटा.", "en", "mr", 0, 550, 0.8))
+    turn = get_room_transcripts(room.room_id)[0]
+    assert turn["original_text"] == "Meet at six."
+    assert turn["translations"]["en"] == "Meet at six."
+    assert turn["confidence"] == 0.95

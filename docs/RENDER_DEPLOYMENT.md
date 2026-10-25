@@ -96,9 +96,24 @@ and complete microphone-to-listener latency still need this deployment test.
 
 ## Behavior and limits
 
+This audit needs no additional environment variables or separate frontend
+deployment. Keep the working provider/database/JWT settings. Startup adds
+indexes for room transcripts, participant membership, and saved-moment lists;
+it does not delete existing tables or data. Initialization failures now stop
+startup rather than being silently ignored.
+
+Microphone mute preserves incoming playback. A route change drains the final
+recognition/speech phrase within a deadline. Test muting immediately after a
+sentence, then unmuting and changing languages. Host transcript clearing blocks
+delayed recognition from recreating old saved speech; saving resumes with the
+next new phrase. Presence reflects live subscriptions rather than passcode
+checks. Account deletion revokes active guest connections, and retrying an
+already completed room-end request succeeds without creating a second recap.
+
 Use **one worker and one backend instance**: live room state is process-local.
 Current admission limits are eight participants and four listening languages
-(`REALTIME_MAX_LANGUAGES`). These are guardrails, not capacity guarantees.
+(`REALTIME_MAX_LANGUAGES`), checked atomically during simultaneous joins and
+language changes. These are guardrails, not capacity guarantees.
 Soniox opens a stream per speaker/target language, shared among listeners.
 Provider concurrency limits and credits can lower practical capacity.
 

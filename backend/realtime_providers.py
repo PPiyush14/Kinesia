@@ -199,7 +199,7 @@ class CartesiaStream:
         if self.socket is not None:
             try:
                 await self.socket.send(json.dumps({"context_id": context_id, "cancel": True}))
-            except Exception:  # noqa: BLE001 - losing a cancelled socket should not stop later captions.
+            except Exception:  # noqa: BLE001 - Report sanitized provider failure and always clean up.
                 await self.close()
 
     async def finish_context(self, context_id, language):
@@ -325,7 +325,7 @@ class SonioxStream:
                         return
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - sanitize third-party errors before sending to clients.
+        except Exception:  # noqa: BLE001 - Report sanitized provider failure and always clean up.
             self.on_error("Soniox stream unavailable. Check the API key, credits and active-stream limit, then reconnect.")
         finally:
             self.closed = True

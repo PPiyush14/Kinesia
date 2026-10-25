@@ -16,7 +16,7 @@ from backend.pipeline import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="run_translator.py",
+        prog="run_kinesia.py",
         description="Kinesia: Real-Time Dual-Channel Speech Translation & Conversational Intelligence Platform.",
     )
     parser.add_argument(

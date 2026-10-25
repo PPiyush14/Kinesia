@@ -12,26 +12,29 @@ export function useSavedMoments(
   const [loading, setLoading] = useState(true);
   const [reload, setReload] = useState(0);
   const generation = useRef(0);
+  const listRevision = useRef(0);
   const errorRef = useRef(onError);
   errorRef.current = onError;
   useEffect(() => {
     if (!enabled) return;
     const current = ++generation.current;
+    const revision = ++listRevision.current;
     setLoading(true);
     setMoments([]);
     setBusy([]);
     roomService
       .getMoments(code)
       .then((data) => {
-        if (current === generation.current)
+        if (current === generation.current && revision === listRevision.current)
           setMoments(Array.isArray(data) ? data : []);
       })
       .catch(() => {
-        if (current === generation.current)
+        if (current === generation.current && revision === listRevision.current)
           errorRef.current('Saved moments could not be loaded.');
       })
       .finally(() => {
-        if (current === generation.current) setLoading(false);
+        if (current === generation.current && revision === listRevision.current)
+          setLoading(false);
       });
     return () => {
       generation.current++;
@@ -44,9 +47,15 @@ export function useSavedMoments(
       try {
         if (saved) await roomService.removeMoment(roomCode, turnId);
         else await roomService.saveMoment(roomCode, turnId);
+        const revision = ++listRevision.current;
         const data = await roomService.getMoments(code);
-        if (current === generation.current)
+        if (
+          current === generation.current &&
+          revision === listRevision.current
+        ) {
           setMoments(Array.isArray(data) ? data : []);
+          setLoading(false);
+        }
       } catch (error) {
         if (current === generation.current)
           errorRef.current(

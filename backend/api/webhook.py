@@ -7,14 +7,11 @@ transmitting the session summary, metadata, and key points to an external endpoi
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from typing import Any
 
 import requests
-
-from backend.core.exceptions import WebhookError
 
 logger = logging.getLogger(__name__)
 
@@ -86,5 +83,5 @@ class WebhookDispatcher:
                     session_id,
                     response.text[:200],
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional delivery failure must not abort a conversation.
             logger.warning("Failed to deliver webhook for session %s: %s", session_id, exc)

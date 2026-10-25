@@ -1,5 +1,107 @@
 # Kinesia pipeline audit and fixes
 
+## Final end-to-end audit: 2026-10-25
+
+This pass inspected the actual browser-to-provider pipeline, authenticated
+REST/WebSocket boundaries, room lifecycle, PostgreSQL/SQLite persistence,
+frontend navigation/history/profile/bookmarks, dependency checks, and committed
+deployment assets. The working speech checkpoint remains
+`checkpoint/working-realtime-2026-10-24` (`40b0b14`). No Render deployment or
+production database operation was performed.
+
+### Confirmed defects and fixes
+
+- **Mute and final speech:** a microphone toggle reset incoming playback and
+  closing a route cancelled pending recognition/TTS. Only a listening-language
+  change now resets incoming playback. Retiring routes flush recognition and
+  drain synthesis with bounded waits, without blocking new route controls.
+  Closed/replaced sessions cannot publish captions or accept more microphone
+  frames. Speaking stop events are no longer lost to a debounce window.
+- **Transcript accuracy:** whichever parallel language stream finished first
+  could determine the stored original, even when the primary stream supplied a
+  later correction. The primary route now owns the canonical source text and
+  confidence. Explicit translations cannot be overwritten by another route's
+  fallback source text. Audio time/epoch still distinguish legitimate repetition.
+- **Room coordination:** simultaneous joins could both pass the eight-person
+  check. Admission, language changes, and room-end flushing now share an atomic
+  coordination boundary. Passcode verification no longer creates online ghosts;
+  presence comes from live subscriptions. Deleting an account revokes its guest
+  connections as well as its hosted rooms, after the database transaction.
+  Room-end retries succeed for recorded and non-recorded conversations.
+- **Privacy and validation:** malformed account/profile/room/WebSocket payloads
+  could raise server errors; string `"false"` could enable recording. Input
+  types, lengths, supported languages, booleans, confidence, uploaded base64,
+  and signed token structure/expiry are checked explicitly. Public unexpected
+  failures return sanitized errors. Host clearing prevents delayed STT from
+  recreating pre-clear saved speech and invalidates stale frontend history loads.
+- **UI races and accessibility:** late profile refreshes no longer overwrite
+  edits; stale bookmark snapshots cannot undo newer mutations; old invite/auth
+  lookups cannot reopen a view after navigation/logout. Ended invites open the
+  conversation review. Form labels and input errors have associated IDs.
+
+### Efficiency and cleanup
+
+- Added idempotent transcript/membership/bookmark indexes. SQLite now enforces
+  foreign keys for cascade behavior representative of PostgreSQL. PostgreSQL
+  initialization/migration failures are visible rather than swallowed.
+- Shared the optional entity extractor instead of loading it twice. Removed
+  the unused frontend dependency on the repository's own root package. Removed
+  unused imports and redundant constructs, and fixed a late-bound CLI callback.
+  Reviewed broad exception boundaries: provider/device/worker isolation remains
+  explicitly documented; known parsing failures use specific exception types.
+- Removed eight generated session/language-state files from tracking and kept
+  their local copies. They remain ignored; older Git history is unchanged.
+  User-provided root summary/source-dump files and local `.env` are preserved
+  and excluded from this change. Rebuilt frontend assets match the source.
+- Replaced obsolete architecture claims with the current browser pipeline and
+  clearly identified the retained workstation/REST/SSE compatibility path.
+  No fake AI success, placeholder conversation data, or new unapproved product
+  feature was added. The earlier cited-recap reliability fix remains intact.
+
+### Actual verification
+
+The starting baseline passed 124 backend tests, 19 frontend unit tests, and 15
+browser scenarios. Regression cases were added for the confirmed lifecycle,
+validation, presence, privacy, and UI race defects; applicable cases were first
+reproduced against the broken behavior.
+
+Final results:
+
+- **146 backend tests passed** in 56.52 seconds. One existing upstream
+  Starlette/httpx test-adapter deprecation warning remains.
+- **20 frontend unit tests and 19 browser scenarios passed**. Browser tests use
+  mocked room/provider responses and a fake microphone, including AudioWorklet.
+- Strict TypeScript checks and the production Vite build passed; the generated
+  frontend is included in the backend's committed static assets.
+- Full configured Ruff checks passed for `backend`, `tests`, and `scripts`.
+  `pip check` found no broken requirements; the frontend npm audit reported
+  zero vulnerabilities. These checks are not a security certification.
+- The final staged snapshot passed whitespace, current-credential, and
+  credential-literal scans across 153 indexed files. Frontend entry references
+  resolve to committed assets. All eight untracked runtime copies still exist;
+  `.env` and both user-provided reference files are excluded.
+
+A live synthetic English-to-Hindi provider probe also passed: 43 Soniox caption
+updates, one final segment, three stable translated phrases, no reported errors,
+and complete voiced text matching the final translation. Stable phrase to first
+PCM measured 125, 157, and 78 ms in this run. Hindi output contained 414,720 PCM
+bytes; an English Cartesia probe produced 380,160 bytes in 969 ms. Those are
+provider smoke-test measurements, excluding recognition wait, Render transport,
+and browser playback; they do not establish end-to-end latency or accuracy.
+No private conversation transcript or production database was used for the probe.
+
+### Remaining deployment validation
+
+The deployment remains one frontend/backend Docker service plus PostgreSQL,
+with no new environment requirement. Deploy the latest `main` manually and run
+the two-device call checklist in [the Render guide](RENDER_DEPLOYMENT.md),
+including mute after a final sentence, overlap, reconnect, host rejoin/end,
+shared clear, private history/moments, recap retries, and non-recorded rooms.
+Actual PostgreSQL connectivity, acoustic echo, device behavior, free-tier wakeup,
+provider quotas, and microphone-to-listener latency need that deployed test.
+Live state still requires one worker/instance; eight participants and four
+listening languages are guardrails rather than an unlimited-scale guarantee.
+
 ## Recap evidence reliability fix: 2026-10-25
 
 The deployed "recap evidence did not match the transcript" error came from a

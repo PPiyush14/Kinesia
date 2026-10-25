@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -19,6 +20,7 @@ import uuid
 from typing import Any
 
 from backend.db.connection import get_db
+from backend.languages import LANGUAGE_DISPLAY_NAMES, normalize_language_code
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +75,18 @@ def create_token(user_id: str, username: str, email: str) -> str:
 
     h_bytes = b64url(json.dumps(header).encode("utf-8"))
     p_bytes = b64url(json.dumps(payload).encode("utf-8"))
-    signing_input = f"{h_bytes}.{p_bytes}".encode("utf-8")
+    signing_input = f"{h_bytes}.{p_bytes}".encode()
     sig = b64url(hmac.new(_get_signing_key(), signing_input, hashlib.sha256).digest())
     return f"{h_bytes}.{p_bytes}.{sig}"
 
 
 def verify_token(token: str) -> dict[str, Any] | None:
     """Verify a signed bearer session token and return payload if valid."""
+    if not isinstance(token, str) or len(token) > 8192:
+        return None
+    token = token.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", token):
+        return None
     parts = token.strip().split(".")
     if len(parts) != 3:
         return None
@@ -87,7 +94,7 @@ def verify_token(token: str) -> dict[str, Any] | None:
     h_str, p_str, sig_str = parts
 
     # Re-compute signature
-    signing_input = f"{h_str}.{p_str}".encode("utf-8")
+    signing_input = f"{h_str}.{p_str}".encode()
     expected_sig = base64.urlsafe_b64encode(
         hmac.new(_get_signing_key(), signing_input, hashlib.sha256).digest()
     ).decode("utf-8").rstrip("=")
@@ -99,13 +106,35 @@ def verify_token(token: str) -> dict[str, Any] | None:
         return s + "=" * (-len(s) % 4)
 
     try:
+        header = json.loads(base64.urlsafe_b64decode(pad_b64(h_str)))
+        if not isinstance(header, dict) or header.get("alg") != "HS256":
+            return None
         payload_json = base64.urlsafe_b64decode(pad_b64(p_str)).decode("utf-8")
         payload = json.loads(payload_json)
-        if time.time() > payload.get("exp", 0):
+        if not isinstance(payload, dict) or not isinstance(payload.get("sub"), str) or not payload["sub"]:
+            return None
+        expiry = payload.get("exp")
+        if (isinstance(expiry, bool) or not isinstance(expiry, (int, float))
+                or not math.isfinite(expiry) or time.time() >= expiry):
             return None
         return payload
-    except Exception:
+    except (ValueError, TypeError, UnicodeError, OverflowError):
         return None
+
+
+def _validate_text(value, label, maximum, *, optional=False):
+    if optional and value is None:
+        return
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ValueError(f"{label} must be text of at most {maximum} characters.")
+
+
+def _profile_language(value):
+    _validate_text(value, "Language", 10)
+    code = normalize_language_code(value)
+    if code not in LANGUAGE_DISPLAY_NAMES:
+        raise ValueError("Select a supported language.")
+    return code
 
 
 def register_user(
@@ -122,6 +151,14 @@ def register_user(
     Raises:
         ValueError: If username or email is invalid or already registered.
     """
+    for value, label, maximum, optional in (
+        (username, "Username", 50, False), (email, "Email", 100, False),
+        (password, "Password", 1024, False), (display_name, "Display name", 100, True),
+        (gender, "Gender", 10, True),
+    ):
+        _validate_text(value, label, maximum, optional=optional)
+    default_input_lang = _profile_language(default_input_lang)
+    default_output_lang = _profile_language(default_output_lang)
     clean_username = username.strip().lower()
     clean_email = email.strip().lower()
     clean_display = (display_name or username).strip()
@@ -201,6 +238,8 @@ def authenticate_user(login_id: str, password: str) -> dict[str, Any]:
     Raises:
         ValueError: On invalid credentials.
     """
+    _validate_text(login_id, "Login", 100)
+    _validate_text(password, "Password", 1024)
     clean_login = login_id.strip().lower()
     with get_db() as db:
         user = db.fetchone(
@@ -263,6 +302,14 @@ def update_user_profile(
     current = get_user_profile(user_id)
     if not current:
         raise ValueError("User not found.")
+
+    for value, label, maximum in ((display_name, "Display name", 100),
+                                  (avatar_color, "Avatar color", 20), (gender, "Gender", 10)):
+        _validate_text(value, label, maximum, optional=True)
+    if default_input_lang is not None:
+        default_input_lang = _profile_language(default_input_lang)
+    if default_output_lang is not None:
+        default_output_lang = _profile_language(default_output_lang)
 
     new_display = display_name.strip() if display_name and display_name.strip() else current["display_name"]
     new_avatar = avatar_color.strip() if avatar_color and avatar_color.strip() else current.get("avatar_color", "#10B981")

@@ -9,11 +9,15 @@ interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
 
 export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
   ({ className, label, options, id, ...props }, ref) => {
-    const selectId = id ?? props.name;
+    const generatedId = React.useId();
+    const selectId = id ?? props.name ?? generatedId;
     return (
       <div className="w-full space-y-1.5">
         {label && (
-          <label htmlFor={selectId} className="block text-xs font-medium text-ink-secondary tracking-wide">
+          <label
+            htmlFor={selectId}
+            className="block text-xs font-medium text-ink-secondary tracking-wide"
+          >
             {label}
           </label>
         )}
@@ -25,12 +29,16 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
               'w-full h-11 appearance-none rounded-xl bg-surface-0 border border-border text-ink-primary text-sm',
               'px-3.5 pr-10 transition-colors duration-150',
               'focus:outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20',
-              className
+              className,
             )}
             {...props}
           >
             {options.map((o) => (
-              <option key={o.value} value={o.value} className="bg-surface-2 text-ink-primary">
+              <option
+                key={o.value}
+                value={o.value}
+                className="bg-surface-2 text-ink-primary"
+              >
                 {o.label}
               </option>
             ))}
@@ -39,6 +47,6 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
         </div>
       </div>
     );
-  }
+  },
 );
 Select.displayName = 'Select';

@@ -1,6 +1,6 @@
 """Hugging Face Spaces and Cloud Platform Entry Point.
 
-Starts the unified Kinesia server (Frontend SPA + Realtime API + Groq Translation)
+Starts the unified Kinesia server (Frontend SPA + realtime speech API)
 listening on 0.0.0.0 and PORT (defaults to 7860 for Hugging Face Spaces).
 """
 
