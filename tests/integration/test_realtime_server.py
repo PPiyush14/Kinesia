@@ -534,6 +534,41 @@ def test_recap_resolves_model_references_to_saved_hindi_sources_and_caches_the_r
     assert len(requests) == 2
 
 
+def test_one_recap_request_with_multiple_sources_finishes_without_manual_retry(realtime_client):
+    import httpx
+
+    from backend.db.rooms import add_transcript
+    from tests.unit.test_conversation_features import referenced_result
+
+    client = realtime_client
+    _, headers = user(client, "one_click_recap")
+    room = client.post("/api/v1/rooms", headers=headers, json={"title": "Several everyday topics"}).json()["data"]
+    turns = [add_transcript(room["id"], room["host_id"], "Host", text, "en", {}) for text in (
+        "The film was interesting.", "The train leaves at six, not five.",
+        "I will bring tea tomorrow.", "I cannot book the tickets yet.")]
+    requests = []
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        refs = payload["response_format"]["json_schema"]["schema"]["properties"]["summary"]["properties"]["source_refs"]
+        # A strict decoder would previously allow all four citations, which the
+        # backend then rejected even though each citation existed.
+        selected = refs["items"]["enum"][:refs.get("maxItems", 4)]
+        response = referenced_result("They discussed a film, a train at six, and bringing tea.", selected)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(response)}}]})
+    client.app.state.recaps.generator.client_factory = lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler))
+    code = room["room_code"]
+    assert client.post(f"/api/v1/rooms/{code}/end", headers=headers, json={}).status_code == 200
+    response = client.post(f"/api/v1/rooms/{code}/recap", headers=headers, json={"language": "hi"})
+    assert response.status_code == 200
+    client.app.state.recaps.pool.submit(lambda: None).result(3)
+    ready = client.get(f"/api/v1/rooms/{code}/recap?output_language=hi", headers=headers).json()["data"]
+    assert ready["status"] == "ready" and ready["error"] is None
+    assert ready["result"]["summary"]["source_ids"] == [turn["id"] for turn in turns]
+    assert ready["result"]["summary"]["evidence"] == turns[0]["original_text"]
+    assert len(requests) == 1
+
+
 def test_saving_disabled_cannot_create_moments_or_send_transcript_for_ai_recap(realtime_client):
     client = realtime_client
     token, headers = user(client, "no_saved_text")

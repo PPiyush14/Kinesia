@@ -1,5 +1,60 @@
 # Kinesia pipeline audit and fixes
 
+## One-click recap citation fix: 2026-10-25
+
+The reported "recap source references could not be verified" failure was
+reproduced. The provider schema allowed an empty citation list or more than
+three citations, but the backend rejected both. Live diagnostics then confirmed
+that fragmented/multi-topic summaries legitimately selected four or seven real
+passages. A three-citation cap is not an evidence check: it was rejecting valid
+summaries. The existing UI and public array contract already support more sources.
+
+Removed that arbitrary cap while retaining all source-integrity checks. Every
+reference must exist in the current input, duplicates are resolved once, actual
+turn IDs are attached by the backend, and the original evidence must exactly
+match a cited source. No missing/unknown reference is guessed or replaced.
+The provider schema now requires at least one citation for each emitted point,
+enforces nonempty/bounded text, and mirrors the existing optional-section size
+limits. Empty optional sections remain valid.
+
+The varied live probe also reproduced HTTP 400 `json_validate_failed`, which
+Groq returned despite strict mode. This is handled as a generation result/error,
+rather than an API-key failure. A supplied candidate is accepted only if it
+passes the complete backend schema/source/evidence validation. Otherwise, one
+automatic repair gives explicit validation feedback and allowed references.
+Repeated invalid candidates still fail safely. Sanitized rejection logs record
+the stage/reason, never transcript content, raw output, or credentials. The quota
+pacing, cooldown persistence, restart/deletion guards, and ready-result cache
+from the preceding fix are preserved.
+
+Actual verification:
+
+- **170 backend tests passed** in 62.35 seconds, with one existing upstream
+  Starlette/httpx test-adapter deprecation warning. Regression cases reproduce
+  the schema/backend mismatch, retain all four legitimate source IDs, exercise
+  provider-side JSON errors and bounded repairs, and verify a single authenticated
+  recap POST reaches ready with one model call and exact persisted evidence.
+- **Five focused recap browser scenarios passed**, including requesting a recap,
+  opening its fourth source, export, quota recovery, and cooldown controls.
+  Full configured Ruff and Git whitespace checks passed. Frontend product source
+  and built assets did not change; no rebuild is needed for this backend fix.
+- **Eight varied live synthetic scenarios passed** across Hindi and English:
+  corrections, brief acknowledgements, fragmented speech, multiple topics, and
+  a 24-turn multi-batch input. All short cases used one model request; the long
+  case used three map/reduce requests within one generation. The previously
+  failing fragmented case now cited four sources, and multi-topic cases cited
+  six/seven. Exact quotes were validated in every case. One case waited roughly
+  35 seconds for the token allowance and resumed automatically without an extra
+  provider attempt. These are bounded smoke tests, not a universal success-rate
+  or semantic-accuracy guarantee.
+
+No private conversations or production database were accessed. The opt-in probe
+now supports `--suite` and reports request counts plus sanitized failure shapes,
+so testing is no longer limited to the same two clean example turns. The fix
+requires no key, environment, schema migration, or deployment-layout change.
+Deploy the latest `main` manually, refresh the browser, and request the old
+failed recap once. The working speech checkpoint remains unchanged.
+
 ## Recap quota recovery: 2026-10-25
 
 The reported screenshot showed a Groq 429 failure. A small live configuration

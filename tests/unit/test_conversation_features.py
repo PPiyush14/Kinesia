@@ -86,6 +86,85 @@ def test_invalid_model_reference_is_repaired_automatically_within_the_same_job(s
     assert "source_refs" in requests[1]["messages"][-1]["content"]
 
 
+@pytest.mark.parametrize("case", ["empty_refs", "too_many_refs", "too_many_highlights", "empty_text", "oversized_text"])
+def test_provider_schema_prevents_schema_valid_answers_the_backend_would_reject(sample_config, case):
+    """Simulate constrained decoding: the old schema permits these failures."""
+    requests = []
+    turns = [{"id": f"turn-{index}", "speaker_name": "A", "original_text": f"We discussed topic {index}."}
+             for index in range(4)]
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        schema = payload["response_format"]["json_schema"]["schema"]
+        refs = schema["properties"]["summary"]["properties"]["source_refs"]
+        selected = refs["items"]["enum"][:refs.get("maxItems", 4)] if case == "too_many_refs" else ["p1"]
+        if case == "empty_refs" and refs.get("minItems", 0) == 0:
+            selected = []
+        reply = referenced_result("They discussed several topics.", selected)
+        text_schema = schema["properties"]["summary"]["properties"]["text"]
+        if case == "empty_text" and not text_schema.get("minLength"):
+            reply["summary"]["text"] = ""
+        if case == "oversized_text" and not text_schema.get("maxLength"):
+            reply["summary"]["text"] = "x" * 701
+        if case == "too_many_highlights":
+            count = min(4, schema["properties"]["highlights"].get("maxItems", 4))
+            reply["highlights"] = [referenced_result("They discussed topic 0.", ["p1"])["summary"] for _ in range(count)]
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(reply)}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    output = generator.generate(turns, "hi")
+    assert output["summary"]["source_ids"]
+    if case == "too_many_refs":
+        assert output["summary"]["source_ids"] == [turn["id"] for turn in turns]
+    assert len(output["highlights"]) <= 3
+    assert len(requests) == 1, "Correct constrained output must succeed without a second generation"
+
+
+def test_provider_rejected_candidate_is_accepted_only_if_all_its_sources_and_shape_validate(sample_config):
+    requests = []
+    turns = [{"id": f"turn-{index}", "speaker_name": "A", "original_text": f"We discussed topic {index}."}
+             for index in range(4)]
+    candidate = referenced_result("They discussed four topics.", ["p1", "p2", "p3", "p4"])
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(400, json={"error": {"code": "json_validate_failed", "failed_generation": json.dumps(candidate)}})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    output = generator.generate(turns, "hi")
+    assert output["summary"]["source_ids"] == [turn["id"] for turn in turns]
+    assert output["summary"]["evidence"] == turns[0]["original_text"]
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("candidate", [json.dumps(referenced_result(references=["invented"])), '{"summary":', None])
+def test_groq_json_validation_error_repairs_automatically_without_accepting_unverified_content(sample_config, candidate, caplog):
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(400, json={"error": {"code": "json_validate_failed", "failed_generation": candidate}})
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(referenced_result())}}]})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="private-test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    assert generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Tomorrow at six, not five."}], "hi") == result()
+    assert len(requests) == 2
+    assert "allowed references" in requests[1]["messages"][-1]["content"]
+    assert "Tomorrow at six" not in caplog.text and "private-test-key" not in caplog.text
+
+
+def test_repeated_provider_json_validation_errors_fail_safely_after_one_repair(sample_config):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(400, json={"error": {"code": "json_validate_failed",
+            "failed_generation": json.dumps(referenced_result(references=["invented"]))}})
+    generator = GroqRecapGenerator(replace(sample_config, groq_api_key="test-key"),
+        client_factory=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(RecapError, match="source references"):
+        generator.generate([{"id": "one", "speaker_name": "A", "original_text": "Tomorrow at six, not five."}], "en")
+    assert len(requests) == 2
+
+
 def test_long_multilingual_recap_reduction_keeps_source_bindings_and_complete_input(sample_config):
     turns = [
         {"id": "first-real-uuid", "speaker_name": "A", "original_text": "Earlier context and details. " * 100},

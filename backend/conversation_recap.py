@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import threading
@@ -23,11 +24,16 @@ from backend.db.conversation_features import (
 from backend.db.rooms import get_room_transcripts
 from backend.languages import LANGUAGE_DISPLAY_NAMES
 
+logger = logging.getLogger(__name__)
+MAX_POINT_TEXT = 700
+SECTION_LIMITS = {"highlights": 3, "follow_ups": 2, "open_questions": 2}
+
 
 class RecapError(ValueError):
-    def __init__(self, message, *, retry_at=None):
+    def __init__(self, message, *, retry_at=None, code=None):
         super().__init__(message)
         self.retry_at = retry_at
+        self.code = code
 
 
 def duration_seconds(value):
@@ -86,15 +92,15 @@ def validate_recap(value, sources):
     normalize = lambda text: " ".join(text.split())
     for key in SCHEMA["required"]:
         points = [value[key]] if key == "summary" else value[key]
-        if not isinstance(points, list) or len(points) > (3 if key == "highlights" else 2):
+        if not isinstance(points, list) or len(points) > SECTION_LIMITS.get(key, 1):
             raise RecapError("The recap response could not be validated. Please retry.")
         for point in points:
             if not isinstance(point, dict) or set(point) != {"text", "source_ids", "evidence"}:
                 raise RecapError("The recap is missing its source evidence. Please retry.")
             ids, text, quote = point["source_ids"], point["text"], point["evidence"]
-            if (not isinstance(text, str) or not text.strip() or len(text) > 700
+            if (not isinstance(text, str) or not text.strip() or len(text) > MAX_POINT_TEXT
                     or not isinstance(quote, str) or not quote.strip() or len(quote) > 400
-                    or not isinstance(ids, list) or not 1 <= len(ids) <= 3
+                    or not isinstance(ids, list) or not 1 <= len(ids) <= len(sources)
                     or any(not isinstance(identifier, str) or identifier not in sources for identifier in ids)
                     or not any(normalize(quote) in normalize(sources[identifier]) for identifier in ids)):
                 raise RecapError("The recap evidence did not match the transcript. Please retry.")
@@ -115,10 +121,16 @@ def resolve_references(value, passages, sources):
             if not isinstance(point, dict) or set(point) != {"text", "source_refs"}:
                 raise RecapError("The recap is missing its source references. Please retry.")
             refs = point["source_refs"]
-            if (not isinstance(refs, list) or not 1 <= len(refs) <= 3
-                    or any(not isinstance(ref, str) or ref not in passages for ref in refs)):
-                raise RecapError("The recap source references could not be verified. Please retry.")
-            selected = [passages[ref] for ref in refs]
+            issue = None
+            if not isinstance(refs, list):
+                issue = "reference_type"
+            elif not refs:
+                issue = "empty_references"
+            elif any(not isinstance(ref, str) or ref not in passages for ref in refs):
+                issue = "unknown_reference"
+            if issue:
+                raise RecapError("The recap source references could not be verified. Please retry.", code=issue)
+            selected = [passages[ref] for ref in dict.fromkeys(refs)]
             entries.append({"text": point["text"],
                             "source_ids": list(dict.fromkeys(passage["source_id"] for passage in selected)),
                             "evidence": selected[0]["text"]})
@@ -215,12 +227,13 @@ class GroqRecapGenerator:
             {"ref": ref, "speaker": passage["speaker"], "text": passage["text"]}
             for ref, passage in allowed.items()]}
         point = {"type": "object", "additionalProperties": False,
-                 "properties": {"text": {"type": "string"}, "source_refs": {
-                     "type": "array", "items": {"type": "string", "enum": list(allowed)}}},
+                 "properties": {"text": {"type": "string", "minLength": 1, "maxLength": MAX_POINT_TEXT}, "source_refs": {
+                     "type": "array", "minItems": 1,
+                     "items": {"type": "string", "enum": list(allowed)}}},
                  "required": ["text", "source_refs"]}
         schema = {"type": "object", "additionalProperties": False,
-                  "properties": {"summary": point, **{key: {"type": "array", "items": point}
-                                                      for key in SCHEMA["required"] if key != "summary"}},
+                  "properties": {"summary": point, **{key: {"type": "array", "maxItems": limit, "items": point}
+                                                      for key, limit in SECTION_LIMITS.items()}},
                   "required": SCHEMA["required"]}
         return content, allowed, schema
 
@@ -235,8 +248,9 @@ class GroqRecapGenerator:
             "arrays are correct. A clear promise such as 'I will bring tea' belongs in follow_ups; "
             "a negated promise such as 'I will not bring coffee' must not become a task. "
             "Return summary, up to 3 highlights, up to 2 follow_ups and up to 2 "
-            "open_questions. Each is {text,source_refs}. Select one to three source_refs from the "
-            "provided passage ref values that directly support that point. Put the strongest "
+            "open_questions. Each is {text,source_refs}. Select at least one source_ref from the "
+            "provided passage ref values that directly support that point. Include every source "
+            "needed to support a multi-topic summary; do not drop citations to satisfy a count limit. Put the strongest "
             "supporting passage first. Never invent references or copy/translate evidence quotes; "
             "the server attaches the original evidence. summary text <=450 characters; "
             "other text <=220 characters. "
@@ -281,10 +295,20 @@ class GroqRecapGenerator:
                     transient_retries += 1
                     self._wait(2 ** transient_retries, "The recap service is temporarily busy. Retrying automatically.")
                     continue
-                if response.status_code >= 400:
+                if response.status_code >= 400 and response.status_code != 400:
                     raise RecapError("The recap service is unavailable. Check its API key and model configuration.")
                 try:
-                    choice = response.json()["choices"][0]
+                    body = response.json()
+                    error = body.get("error") if isinstance(body, dict) else None
+                    if response.status_code == 400 and isinstance(error, dict) and error.get("code") == "json_validate_failed":
+                        # Groq may return a candidate with this error even in
+                        # strict mode. It receives the same complete validation
+                        # as a 200 response, or one automatic repair attempt.
+                        choice = {"finish_reason": "stop", "message": {"content": error.get("failed_generation")}}
+                    elif response.status_code >= 400:
+                        raise RecapError("The recap service is unavailable. Check its API key and model configuration.")
+                    else:
+                        choice = body["choices"][0]
                     if not isinstance(choice, dict):
                         raise TypeError("Expected a completion choice.")
                 except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
@@ -295,6 +319,8 @@ class GroqRecapGenerator:
                     result = json.loads(choice["message"]["content"])
                     resolve_references(result, allowed, sources)
                 except (RecapError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                    logger.warning("recap_output_rejected stage=%s repaired=%s reason=%s",
+                                   "merge" if merging else "map", repaired, getattr(exc, "code", None) or type(exc).__name__)
                     if repaired:
                         if isinstance(exc, RecapError):
                             raise
@@ -303,9 +329,13 @@ class GroqRecapGenerator:
                     if choice.get("finish_reason") == "length":
                         payload["max_completion_tokens"] = 3200
                     payload["messages"].append({"role": "user", "content":
-                        "The last response could not be verified. Return the requested schema again. "
-                        "Each point needs one to three source_refs selected from the provided passages. "
-                        "Keep text concise, respect the item and text length limits; omit unsupported optional points."})
+                        f"Validation failed ({getattr(exc, 'code', None) or 'invalid_shape_or_text'}). "
+                        "Return the requested schema again. Every emitted point needs nonempty text "
+                        "and a nonempty source_refs list. Use only these allowed references: " + json.dumps(list(allowed)) +
+                        ". Cite all sources needed, without inventing or omitting references. "
+                        "Use [] for optional sections with no supported points. Maximum section counts: "
+                        "3 highlights, 2 follow_ups, 2 open_questions. Keep summary <=450 characters "
+                        "and other text <=220 characters."})
                     continue
                 return result
 

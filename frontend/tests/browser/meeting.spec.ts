@@ -365,9 +365,10 @@ test('AI recap is requested explicitly in the review language and links to its s
   const ended = { ...room, is_active: false, status: 'ended' };
   const connection = await meeting(page, 'history', [ended]);
   const turn = { id: 'source-one', speaker_name: 'Guest Participant', source_lang: 'en', original_text: 'Tomorrow at six, not five.', localized_text: 'कल छह बजे, पाँच बजे नहीं।', translations: { hi: 'कल छह बजे, पाँच बजे नहीं।' } };
+  const otherTurns = ['two', 'three', 'four'].map((name) => ({ ...turn, id: `source-${name}`, original_text: `Additional topic ${name}.` }));
   let generated = false;
-  const point = { text: 'हम कल छह बजे मिलेंगे, पाँच बजे नहीं।', source_ids: ['source-one'], evidence: turn.original_text };
-  await page.route('**/api/v1/rooms/*/transcripts', (route) => route.fulfill({ json: { data: [turn] } }));
+  const point = { text: 'हम कल छह बजे मिलेंगे, पाँच बजे नहीं।', source_ids: ['source-one', ...otherTurns.map((entry) => entry.id)], evidence: turn.original_text };
+  await page.route('**/api/v1/rooms/*/transcripts', (route) => route.fulfill({ json: { data: [turn, ...otherTurns] } }));
   await page.route(/\/api\/v1\/rooms\/[^/]+\/recap(?:\?|$)/, async (route) => {
     if (route.request().method() === 'POST') {
       expect(route.request().postDataJSON()).toEqual({ language: 'hi' });
@@ -384,7 +385,7 @@ test('AI recap is requested explicitly in the review language and links to its s
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export recap' }).click();
   expect((await download).suggestedFilename()).toBe(`kinesia-${room.room_code}-recap.md`);
-  await page.getByRole('button', { name: 'Source 1', exact: true }).click();
+  await page.getByRole('button', { name: 'Source 4', exact: true }).click();
   await expect(page.getByRole('tab', { name: 'Transcript', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText(turn.original_text, { exact: true })).toBeVisible();
   expect(connection.errors).toEqual([]);

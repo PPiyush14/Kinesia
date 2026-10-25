@@ -141,6 +141,9 @@ deadline and explicit errors. Free-tier rate limits may delay or reject requests
 Groq selects references to original passages; the backend attaches the actual
 transcript turn IDs and exact quotes. Unknown references are rejected, with one
 automatic repair attempt, including recovery from a cut-short completion.
+Valid summaries can cite every source they need; there is no three-source cap.
+The schema requires nonempty citations. Provider-side `json_validate_failed`
+candidates undergo the same full validation or bounded repair as normal output.
 Requests are paced from Groq token/reset headers. Temporary quota waits keep
 the job active and show an automatic resume time. When the reset exceeds the
 generation deadline, a persisted cooldown shows when retry becomes available;
